@@ -263,37 +263,84 @@ extension WalletManager: PKAddPaymentPassViewControllerDelegate {
       if addPassViewController == nil {
         return
       }
-      
-      let errorMessage = error?.localizedDescription ?? ""
 
-      if error != nil {
-        self.logInfo(message: "Error: \(errorMessage)")
+      let errorInfo = describePassKitError(error)
+
+      if let error = error {
+        self.logInfo(message: "PassKit error: domain=\(errorInfo["errorDomain"] ?? "") code=\(errorInfo["errorCode"] ?? "") reason=\(errorInfo["errorReason"] ?? "") description=\(error.localizedDescription)")
         delegate?.sendEvent(name: Event.onCardActivated.rawValue, result:  [
           "status": "canceled"
         ]);
       }
-      
+
       // Cancel the IOSPresentAddPaymentPassView function when the user cancelled the modal
       if let handler = presentAddPaymentPassCompletionHandler {
         let response = AddPassResponse(status: .canceled, nonce: nil, nonceSignature: nil, certificates: nil)
         handler(.canceled, response.toNSDictionary())
       }
-      
+
       // If the pass is returned complete the IOSHandleAddPaymentPassResponse function
       if let addPaymentPassHandler = addPaymentPassCompletionHandler {
         if pass != nil {
           addPaymentPassHandler(.completed, nil)
         } else {
-          addPaymentPassHandler(.error, [
-            "errorMessage": "Could not add card. \(errorMessage))."
-          ])
+          let reason = errorInfo["errorReason"] as? String ?? "unknownError"
+          let description = (error?.localizedDescription).map { ": \($0)" } ?? ""
+          var payload: [String: Any] = [
+            "errorMessage": "Could not add card (\(reason))\(description)"
+          ]
+          payload.merge(errorInfo) { current, _ in current }
+          addPaymentPassHandler(.error, payload as NSDictionary)
         }
       }
-      
+
       hideModal()
       addPaymentPassCompletionHandler = nil
       presentAddPaymentPassCompletionHandler = nil
     }
+
+  private func describePassKitError(_ error: Error?) -> [String: Any] {
+    guard let error = error else { return [:] }
+    let nsError = error as NSError
+
+    var info: [String: Any] = [
+      "errorDomain": nsError.domain,
+      "errorCode": nsError.code,
+      "errorDescription": nsError.localizedDescription
+    ]
+
+    if nsError.domain == PKPassKitErrorDomain {
+      info["errorReason"] = passKitErrorReason(code: nsError.code)
+    }
+
+    if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+      info["underlyingDomain"] = underlying.domain
+      info["underlyingCode"] = underlying.code
+      info["underlyingDescription"] = underlying.localizedDescription
+    }
+
+    if let failureReason = nsError.localizedFailureReason {
+      info["failureReason"] = failureReason
+    }
+    if let recovery = nsError.localizedRecoverySuggestion {
+      info["recoverySuggestion"] = recovery
+    }
+
+    return info
+  }
+
+  private func passKitErrorReason(code: Int) -> String {
+    // Maps PKAddPaymentPassError raw values to readable reasons.
+    // Apple does not expose every PKPassKitErrorDomain code as an enum,
+    // so unknown codes fall through to a generic label.
+    switch code {
+    case 0: return "unknownError"
+    case 1: return "userCancelled"
+    case 2: return "invalidSignature"
+    case 3: return "notEntitled"
+    default: return "passKitError(\(code))"
+    }
+  }
 }
 
 extension WalletManager {
