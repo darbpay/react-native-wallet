@@ -63,6 +63,22 @@ open class WalletManager: UIViewController {
     if let replacedPasses = userInfo[PKPassLibraryNotificationKey.replacementPassesUserInfoKey] as? [PKPass] {
       checkPassActivationStatus(replacedPasses)
     }
+
+    // Check for removed passes. Apple delivers these as an array of metadata
+    // dictionaries (the PKPass objects no longer exist), keyed by typed
+    // PKPassLibraryNotificationKey constants — not literal "serialNumber".
+    if let removedInfos = userInfo[PKPassLibraryNotificationKey.removedPassInfosUserInfoKey] as? [[AnyHashable: Any]] {
+      for info in removedInfos {
+        guard let serial = info[PKPassLibraryNotificationKey.serialNumberUserInfoKey] as? String else {
+          continue
+        }
+        let passTypeId = info[PKPassLibraryNotificationKey.passTypeIdentifierUserInfoKey] as? String ?? ""
+        delegate?.sendEvent(name: Event.onCardRemoved.rawValue, result: [
+          "tokenId": serial,
+          "passTypeIdentifier": passTypeId
+        ])
+      }
+    }
   }
   
   func checkPassActivationStatus(_ passes: [PKPass]) {
@@ -283,6 +299,7 @@ extension WalletManager: PKAddPaymentPassViewControllerDelegate {
 extension WalletManager {
   enum Event: String, CaseIterable {
     case onCardActivated
+    case onCardRemoved
   }
 
   @objc

@@ -11,6 +11,7 @@ import type {
   IOSEncryptPayload,
   AndroidWalletData,
   onCardActivatedPayload,
+  onCardRemovedPayload,
   IOSAddPaymentPassData,
   TokenInfo,
 } from './NativeWallet';
@@ -23,7 +24,7 @@ function getModuleLinkingRejection() {
 
 const eventEmitter = new NativeEventEmitter(Wallet);
 
-function addListener(event: string, callback: (data: onCardActivatedPayload) => void): EmitterSubscription {
+function addListener<T = onCardActivatedPayload | onCardRemovedPayload>(event: string, callback: (data: T) => void): EmitterSubscription {
   return eventEmitter.addListener(event, callback);
 }
 
@@ -152,7 +153,18 @@ async function addCardToAppleWallet(
   return getTokenizationStatus(status);
 }
 
-export type {AndroidCardData, AndroidWalletData, CardStatus, IOSEncryptPayload, IOSCardData, IOSAddPaymentPassData, onCardActivatedPayload, TokenizationStatus, TokenInfo};
+export type {
+  AndroidCardData,
+  AndroidWalletData,
+  CardStatus,
+  IOSEncryptPayload,
+  IOSCardData,
+  IOSAddPaymentPassData,
+  onCardActivatedPayload,
+  onCardRemovedPayload,
+  TokenizationStatus,
+  TokenInfo,
+};
 export {
   AddToWalletButton,
   checkWalletAvailability,
