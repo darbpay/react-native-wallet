@@ -113,7 +113,19 @@ RCT_REMAP_METHOD(getCardStatusByIdentifier,
                        code:(NSInteger)code
                 description:(NSString *)description
                    rejecter:(RCTPromiseRejectBlock)reject {
-  NSDictionary *userInfo = @{NSLocalizedDescriptionKey: description};
+  [self rejectWithErrorType:type code:code description:description extra:nil rejecter:reject];
+}
+
+- (void)rejectWithErrorType:(NSString *)type
+                       code:(NSInteger)code
+                description:(NSString *)description
+                      extra:(NSDictionary *)extra
+                   rejecter:(RCTPromiseRejectBlock)reject {
+  NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
+  userInfo[NSLocalizedDescriptionKey] = description;
+  if (extra) {
+    [userInfo addEntriesFromDictionary:extra];
+  }
   NSString *errorWithDomain = walletManager.packageName;
   NSError *error = [NSError errorWithDomain:errorWithDomain
                                        code:code
@@ -133,7 +145,13 @@ RCT_REMAP_METHOD(getCardStatusByIdentifier,
     resolve(data);
   } else {
     NSString *errorMessage = data[@"errorMessage"] ?: defaultErrorMsg ?: @"Operation failed";
-    [self rejectWithErrorType:errorPrefix code:1001 description:errorMessage rejecter:reject];
+    NSMutableDictionary *extra = [NSMutableDictionary dictionary];
+    for (NSString *key in data) {
+      if (![key isEqualToString:@"errorMessage"]) {
+        extra[key] = data[key];
+      }
+    }
+    [self rejectWithErrorType:errorPrefix code:1001 description:errorMessage extra:extra rejecter:reject];
   }
 }
 
