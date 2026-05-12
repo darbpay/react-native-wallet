@@ -45,7 +45,7 @@ type IOSCardData = {
 
 type onCardActivatedPayload = {
   tokenId: string;
-  status: 'activated' | 'canceled';
+  status: 'activated' | 'canceled' | 'requiresActivation' | 'pending' | 'suspended' | 'deactivated' | 'unknown';
 };
 
 type onCardRemovedPayload = {

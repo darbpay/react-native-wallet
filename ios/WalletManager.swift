@@ -41,24 +41,28 @@ open class WalletManager: UIViewController {
   }
   
   func addPassObserver() {
+    // object: nil so we listen to notifications from any PKPassLibrary instance,
+    // not only this one. The OS sometimes posts from a different instance.
     NotificationCenter.default.addObserver(
       self,
       selector: #selector(passLibraryDidChange),
       name: NSNotification.Name(rawValue: PKPassLibraryNotificationName.PKPassLibraryDidChange.rawValue),
-      object: passLibrary
+      object: nil
     )
   }
-  
+
   @objc func passLibraryDidChange(_ notification: Notification) {
+    self.logInfo(message: "passLibraryDidChange fired. userInfo keys: \(notification.userInfo?.keys.map { "\($0)" } ?? [])")
+
     guard let userInfo = notification.userInfo else {
       return
     }
-    
+
     // Check if passes were added or status changed
     if let addedPasses = userInfo[PKPassLibraryNotificationKey.addedPassesUserInfoKey] as? [PKPass] {
       checkPassActivationStatus(addedPasses)
     }
-    
+
     // Check for updated passes
     if let replacedPasses = userInfo[PKPassLibraryNotificationKey.replacementPassesUserInfoKey] as? [PKPass] {
       checkPassActivationStatus(replacedPasses)
@@ -83,12 +87,27 @@ open class WalletManager: UIViewController {
   
   func checkPassActivationStatus(_ passes: [PKPass]) {
     for pass in passes {
-      if pass.secureElementPass?.passActivationState == .activated {
-        delegate?.sendEvent(name: Event.onCardActivated.rawValue, result:  [
-          "status": "activated",
-          "tokenId": pass.serialNumber
-        ]);
+      guard let secure = pass.secureElementPass else {
+        self.logInfo(message: "Pass without secureElementPass: serial=\(pass.serialNumber)")
+        continue
       }
+      let status = mapActivationState(secure.passActivationState)
+      self.logInfo(message: "Emitting onCardActivated: status=\(status) serial=\(pass.serialNumber)")
+      delegate?.sendEvent(name: Event.onCardActivated.rawValue, result: [
+        "status": status,
+        "tokenId": pass.serialNumber
+      ])
+    }
+  }
+
+  private func mapActivationState(_ state: PKSecureElementPassActivationState) -> String {
+    switch state {
+    case .activated: return "activated"
+    case .requiresActivation: return "requiresActivation"
+    case .activating: return "pending"
+    case .suspended: return "suspended"
+    case .deactivated: return "deactivated"
+    @unknown default: return "unknown"
     }
   }
 
