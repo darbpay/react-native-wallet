@@ -93,12 +93,25 @@ RCT_REMAP_METHOD(getCardStatusByIdentifier,
   resolve([walletManager getCardStatusByIdentifierWithIdentifier:identifier]);
 }
 
-- (void)addCardToGoogleWallet:(JS::NativeWallet::AndroidCardData &)cardData resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject { 
-  // no-op
+- (void)addCardToGoogleWallet:(JS::NativeWallet::AndroidCardData &)cardData resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  // no-op (Android only)
+}
+
+- (void)resumeAddCardToGoogleWallet:(JS::NativeWallet::AndroidResumeCardData &)cardData resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  // no-op (Android only)
+}
+
+- (void)ensureGoogleWalletInitialized:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  // no-op (Android only)
+  resolve(@(NO));
 }
 
 - (void)getSecureWalletInfo:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
-  // no-op
+  // no-op (Android only)
+}
+
+- (void)listTokens:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  resolve([walletManager listPasses]);
 }
 
 - (NSArray<NSString *> *)supportedEvents {

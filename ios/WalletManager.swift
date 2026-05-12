@@ -183,7 +183,7 @@ open class WalletManager: UIViewController {
       self.logInfo(message: "No passes found in Wallet.")
       return -1
     }
-    
+
     for pass in paymentPasses {
       guard let securePassElement = pass.secureElementPass else { continue }
       if condition(securePassElement) {
@@ -203,6 +203,21 @@ open class WalletManager: UIViewController {
     return getPassActivationState { pass in
       return pass.primaryAccountIdentifier == identifier as String
     }
+  }
+
+  @objc public func listPasses() -> NSArray {
+    let paymentPasses = passLibrary.passes(of: .payment)
+    var results: [NSDictionary] = []
+    for pass in paymentPasses {
+      guard let secure = pass.secureElementPass else { continue }
+      results.append([
+        "identifier": secure.primaryAccountIdentifier ?? "",
+        "lastDigits": secure.primaryAccountNumberSuffix ?? "",
+        "tokenState": secure.passActivationState.rawValue,
+      ])
+    }
+
+    return results as NSArray
   }
   
   private func isPassKitAvailable() -> Bool {

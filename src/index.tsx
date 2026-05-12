@@ -178,17 +178,17 @@ async function resumeAddCardToGoogleWallet(cardData: AndroidResumeCardData): Pro
 }
 
 async function listTokens(): Promise<TokenInfo[]> {
-  if (Platform.OS === 'ios') {
-    return Promise.resolve([]);
-  }
-
   if (!Wallet) {
     return getModuleLinkingRejection();
   }
-  const isWalletInitialized = await Wallet.ensureGoogleWalletInitialized();
-  if (!isWalletInitialized) {
-    throw new Error('Wallet could not be initialized');
+
+  if (Platform.OS === 'android') {
+    const isWalletInitialized = await Wallet.ensureGoogleWalletInitialized();
+    if (!isWalletInitialized) {
+      throw new Error('Wallet could not be initialized');
+    }
   }
+
   return Wallet.listTokens();
 }
 
