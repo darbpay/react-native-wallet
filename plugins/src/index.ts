@@ -290,19 +290,93 @@ const withExtensionXcodeTarget: ConfigPlugin<ResolvedExtensionConfig> = (config,
     return cfg;
   });
 
-/** Adds `target '<name>' do pod 'react-native-wallet/WalletExtension' end` to the Podfile. */
+/**
+ * Adds a nested `target '<name>' do ... end` for the WalletExtension *inside*
+ * the host app's target block. CocoaPods requires app-extension targets to be
+ * nested inside their host target so it can resolve the host-target
+ * relationship; a sibling-target Podfile entry fails with
+ * "Unable to find host target(s) for <ext>".
+ *
+ * Uses `inherit! :search_paths` so the extension does NOT link the parent's
+ * pods (React-Core, Expo modules, etc.) — only the lib's WalletExtension
+ * subspec, which is React-free by design.
+ */
 const withExtensionPodfile: ConfigPlugin<ResolvedExtensionConfig> = (config, ext) =>
   withPodfile(config, (cfg) => {
-    const podBlock = `target '${ext.targetName}' do\n  pod 'react-native-wallet/WalletExtension', :path => '../node_modules/@darbpay/react-native-wallet'\nend`;
+    const tag = 'react-native-wallet-extension-target';
+    const podBlock = [
+      `target '${ext.targetName}' do`,
+      `  inherit! :search_paths`,
+      `  pod 'react-native-wallet/WalletExtension', :path => '../node_modules/@darbpay/react-native-wallet'`,
+      `end`,
+    ].join('\n');
+
+    // Strip any prior generated block from a previous prebuild — wherever it
+    // was placed — so we never end up with two copies on re-runs.
+    const stripped = (removeGeneratedContents(cfg.modResults.contents, tag) ?? cfg.modResults.contents).trimEnd();
+
+    const header = createGeneratedHeaderComment(podBlock, tag, '#');
+    const generated = [header, podBlock, `# @generated end ${tag}`].join('\n');
+
     // eslint-disable-next-line no-param-reassign
-    cfg.modResults.contents = appendContents({
-      comment: '#',
-      newSrc: podBlock,
-      src: cfg.modResults.contents,
-      tag: 'react-native-wallet-extension-target',
-    }).contents;
+    cfg.modResults.contents = injectIntoFirstTargetBlock(stripped, generated, ext.targetName);
     return cfg;
   });
+
+/**
+ * Inserts `blockToInsert` immediately before the closing `end` of the first
+ * `target '...' do` in the Podfile (the host app target — Expo's main iOS
+ * target is always the first one declared).
+ *
+ * Match strategy: the matching `end` is the next line that is just `end`
+ * (whitespace only) at the SAME indentation as the opening `target` line.
+ * Relies on the universal Ruby formatting convention that block openers and
+ * closers share indentation — this is how rubocop and rubyfmt format files.
+ *
+ * Throws if the host target can't be located; that's a louder failure than
+ * silently producing a broken Podfile.
+ */
+function injectIntoFirstTargetBlock(src: string, blockToInsert: string, extTargetName: string): string {
+  const lines = src.split('\n');
+  const targetOpen = /^(\s*)target\s+['"]([^'"]+)['"]\s+do\b/;
+
+  let startIdx = -1;
+  let baseIndent = '';
+  let hostName = '';
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(targetOpen);
+    if (m && m[2] !== extTargetName) {
+      startIdx = i;
+      baseIndent = m[1];
+      hostName = m[2];
+      break;
+    }
+  }
+  if (startIdx === -1) {
+    throw new Error(`react-native-wallet: could not find a host \`target '...' do\` block in the Podfile to nest the '${extTargetName}' extension inside.`);
+  }
+
+  const closerRegex = new RegExp(`^${baseIndent}end\\s*$`);
+  let endIdx = -1;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    if (closerRegex.test(lines[i])) {
+      endIdx = i;
+      break;
+    }
+  }
+  if (endIdx === -1) {
+    throw new Error(`react-native-wallet: could not find the matching \`end\` for host target '${hostName}' in the Podfile.`);
+  }
+
+  const innerIndent = `${baseIndent}  `;
+  const indented = blockToInsert
+    .split('\n')
+    .map((line) => (line.length ? `${innerIndent}${line}` : ''))
+    .join('\n');
+
+  lines.splice(endIdx, 0, indented);
+  return lines.join('\n');
+}
 
 // MARK: - File contents
 
@@ -342,14 +416,18 @@ function buildExtensionInfoPlist(ext: ResolvedExtensionConfig): string {
 }
 
 function buildExtensionEntitlements(ext: ResolvedExtensionConfig): string {
-  // NOTE (master spec open-question #1): the extension may also need
-  // `com.apple.developer.payment-pass-provisioning` and/or its own provisioning
-  // profile depending on how Apple scopes the App ID. Confirm with the Apple
-  // Developer account holder; add the key here if required.
+  // `payment-pass-provisioning` is mandatory for any binary that hosts a
+  // PKIssuerProvisioningExtension — without it the extension fails to register
+  // with Wallet at runtime, and the binary is rejected on App Store submission.
+  // The entitlement itself is Apple-issued: the matching App ID must have it
+  // granted via the Apple Pay program before signing succeeds for distribution
+  // builds (development signing typically works without).
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>com.apple.developer.payment-pass-provisioning</key>
+  <true/>
   <key>com.apple.security.application-groups</key>
   <array>
     <string>${ext.appGroup}</string>
@@ -444,4 +522,4 @@ function setTargetBuildSettings(project: XcodeProject, targetUuid: string, setti
   });
 }
 
-export default createRunOncePlugin(withReactNativeWallet, 'ReactNativeWallet', '0.2.0');
+export default createRunOncePlugin(withReactNativeWallet, 'ReactNativeWallet', '0.2.1');

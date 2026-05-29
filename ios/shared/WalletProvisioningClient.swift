@@ -35,6 +35,14 @@ enum ProvisioningError: Error {
 ///  - `WalletExtensionEncryptBaseUrl` — e.g. "https://api.darbpay.com/api/employee"
 /// The full URL is `{base}/cards/{cardId}/apple-pay/encrypt`.
 /// Auth is the Clerk session token read from the shared keychain.
+///
+/// Wire format matches the in-app Green Path (see `hooks/use-apple-pay.ts` in
+/// the consumer app):
+///  - Request: `nonce` and `nonceSignature` are HEX strings; `certificates`
+///    are base64 strings.
+///  - Response: `{ encryptedPassData, wrappedKey, activationCode }`, all
+///    base64 strings. `wrappedKey` maps to PassKit's `ephemeralPublicKey` and
+///    `activationCode` maps to `activationData`.
 enum WalletProvisioningClient {
   static let encryptBaseUrlKey = "WalletExtensionEncryptBaseUrl"
   private static let requestTimeout: TimeInterval = 30
@@ -42,15 +50,15 @@ enum WalletProvisioningClient {
   /// Request body — field names must match the encrypt endpoint contract
   /// (the same backend the in-app Green Path posts to).
   private struct RequestBody: Encodable {
-    let nonce: String
-    let nonceSignature: String
-    let certificates: [String]
+    let nonce: String           // hex
+    let nonceSignature: String  // hex
+    let certificates: [String]  // base64
   }
 
   private struct ResponseBody: Decodable {
-    let encryptedPassData: String
-    let activationData: String
-    let ephemeralPublicKey: String
+    let encryptedPassData: String  // base64
+    let wrappedKey: String         // base64 — maps to PassKit ephemeralPublicKey
+    let activationCode: String     // base64 — maps to PassKit activationData
   }
 
   static func encrypt(
@@ -70,8 +78,8 @@ enum WalletProvisioningClient {
     }
 
     let body = RequestBody(
-      nonce: request.nonce.base64EncodedString(),
-      nonceSignature: request.nonceSignature.base64EncodedString(),
+      nonce: request.nonce.hexEncodedString(),
+      nonceSignature: request.nonceSignature.hexEncodedString(),
       certificates: request.certificates.map { $0.base64EncodedString() }
     )
 
@@ -99,9 +107,9 @@ enum WalletProvisioningClient {
       }
       guard let data,
             let decoded = try? JSONDecoder().decode(ResponseBody.self, from: data),
-            let encryptedPassData = Data(base64Encoded: decoded.encryptedPassData),
-            let activationData = Data(base64Encoded: decoded.activationData),
-            let ephemeralPublicKey = Data(base64Encoded: decoded.ephemeralPublicKey) else {
+            let encryptedPassData = Data(base64Encoded: decoded.encryptedPassData, options: .ignoreUnknownCharacters),
+            let activationData = Data(base64Encoded: decoded.activationCode, options: .ignoreUnknownCharacters),
+            let ephemeralPublicKey = Data(base64Encoded: decoded.wrappedKey, options: .ignoreUnknownCharacters) else {
         completion(.failure(.decode))
         return
       }
@@ -111,5 +119,11 @@ enum WalletProvisioningClient {
         ephemeralPublicKey: ephemeralPublicKey
       )))
     }.resume()
+  }
+}
+
+private extension Data {
+  func hexEncodedString() -> String {
+    map { String(format: "%02x", $0) }.joined()
   }
 }
