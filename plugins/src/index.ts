@@ -484,6 +484,17 @@ function addExtensionTarget(project: XcodeProject, ext: ResolvedExtensionConfig,
   project.addBuildPhase([], 'PBXFrameworksBuildPhase', 'Frameworks', target.uuid);
 
   // Host app depends on the extension so it builds + embeds.
+  // node-xcode's `addTargetDependency` silently no-ops if the project has no
+  // existing `PBXTargetDependency` / `PBXContainerItemProxy` sections (see
+  // node_modules/xcode/lib/pbxProject.js — the body is guarded by
+  // `if (pbxContainerItemProxySection && pbxTargetDependencySection)`).
+  // Expo-generated projects start without either, so without seeding them
+  // first the call produces no entries and CocoaPods can't see the host →
+  // extension relationship, failing with
+  // "Unable to find host target(s) for <ext>. Please add the host targets…".
+  const projectObjects = project.hash.project.objects;
+  projectObjects.PBXTargetDependency = projectObjects.PBXTargetDependency || {};
+  projectObjects.PBXContainerItemProxy = projectObjects.PBXContainerItemProxy || {};
   project.addTargetDependency(project.getFirstTarget().uuid, [target.uuid]);
 
   // Target-specific build settings.
