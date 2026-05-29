@@ -100,7 +100,7 @@ open class WalletManager: UIViewController {
     }
   }
 
-  private func mapActivationState(_ state: PKSecureElementPassActivationState) -> String {
+  private func mapActivationState(_ state: PKSecureElementPass.PassActivationState) -> String {
     switch state {
     case .activated: return "activated"
     case .requiresActivation: return "requiresActivation"
@@ -225,7 +225,14 @@ open class WalletManager: UIViewController {
   }
 
   @objc public func listPasses() -> NSArray {
+    let allPasses = passLibrary.passes()
+    self.logInfo(message: "DEBUG all passes count: \(allPasses.count)")
+    for pass in allPasses {
+      self.logInfo(message: "DEBUG pass type=\(pass.passType.rawValue) passTypeIdentifier=\(pass.passTypeIdentifier) serialNumber=\(pass.serialNumber)")
+    }
+
     let paymentPasses = passLibrary.passes(of: .payment)
+    self.logInfo(message: "DEBUG payment passes count: \(paymentPasses.count)")
     var results: [NSDictionary] = []
     for pass in paymentPasses {
       guard let secure = pass.secureElementPass else { continue }
