@@ -45,7 +45,12 @@ type IOSCardData = {
 
 type onCardActivatedPayload = {
   tokenId: string;
-  status: 'activated' | 'canceled';
+  status: 'activated' | 'canceled' | 'requiresActivation' | 'pending' | 'suspended' | 'deactivated' | 'unknown';
+};
+
+type onCardRemovedPayload = {
+  tokenId: string;
+  passTypeIdentifier: string;
 };
 
 type IOSAddPaymentPassData = {
@@ -107,6 +112,7 @@ export type {
   CardStatus,
   UserAddress,
   onCardActivatedPayload,
+  onCardRemovedPayload,
   Platform,
   IOSAddPaymentPassData,
   IOSEncryptPayload,

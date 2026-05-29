@@ -1,6 +1,6 @@
 {
-  "name": "@expensify/react-native-wallet",
-  "version": "0.1.21",
+  "name": "@darbpay/react-native-wallet",
+  "version": "0.1.27",
   "description": "A React Native module designed for seamless integration of Card Push Provisioning into Apple Wallet and Google Wallet, enabling easy and secure addition of payment cards directly from your application.",
   "source": "./src/index.tsx",
   "main": "lib/commonjs/index",
@@ -51,17 +51,16 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Expensify/react-native-wallet.git"
+    "url": "git+https://github.com/darbpay/react-native-wallet.git"
   },
   "author": "Expensify, Inc.",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/Expensify/react-native-wallet/issues"
+    "url": "https://github.com/darbpay/react-native-wallet/issues"
   },
-  "homepage": "https://github.com/Expensify/react-native-wallet#readme",
+  "homepage": "https://github.com/darbpay/react-native-wallet#readme",
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/",
-    "access": "public"
+    "registry": "https://npm.pkg.github.com"
   },
   "devDependencies": {
     "@babel/preset-env": "^7.25.3",

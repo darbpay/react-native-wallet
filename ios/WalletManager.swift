@@ -41,38 +41,73 @@ open class WalletManager: UIViewController {
   }
   
   func addPassObserver() {
+    // object: nil so we listen to notifications from any PKPassLibrary instance,
+    // not only this one. The OS sometimes posts from a different instance.
     NotificationCenter.default.addObserver(
       self,
       selector: #selector(passLibraryDidChange),
       name: NSNotification.Name(rawValue: PKPassLibraryNotificationName.PKPassLibraryDidChange.rawValue),
-      object: passLibrary
+      object: nil
     )
   }
-  
+
   @objc func passLibraryDidChange(_ notification: Notification) {
+    self.logInfo(message: "passLibraryDidChange fired. userInfo keys: \(notification.userInfo?.keys.map { "\($0)" } ?? [])")
+
     guard let userInfo = notification.userInfo else {
       return
     }
-    
+
     // Check if passes were added or status changed
     if let addedPasses = userInfo[PKPassLibraryNotificationKey.addedPassesUserInfoKey] as? [PKPass] {
       checkPassActivationStatus(addedPasses)
     }
-    
+
     // Check for updated passes
     if let replacedPasses = userInfo[PKPassLibraryNotificationKey.replacementPassesUserInfoKey] as? [PKPass] {
       checkPassActivationStatus(replacedPasses)
+    }
+
+    // Check for removed passes. Apple delivers these as an array of metadata
+    // dictionaries (the PKPass objects no longer exist), keyed by typed
+    // PKPassLibraryNotificationKey constants — not literal "serialNumber".
+    if let removedInfos = userInfo[PKPassLibraryNotificationKey.removedPassInfosUserInfoKey] as? [[AnyHashable: Any]] {
+      for info in removedInfos {
+        guard let serial = info[PKPassLibraryNotificationKey.serialNumberUserInfoKey] as? String else {
+          continue
+        }
+        let passTypeId = info[PKPassLibraryNotificationKey.passTypeIdentifierUserInfoKey] as? String ?? ""
+        delegate?.sendEvent(name: Event.onCardRemoved.rawValue, result: [
+          "tokenId": serial,
+          "passTypeIdentifier": passTypeId
+        ])
+      }
     }
   }
   
   func checkPassActivationStatus(_ passes: [PKPass]) {
     for pass in passes {
-      if pass.secureElementPass?.passActivationState == .activated {
-        delegate?.sendEvent(name: Event.onCardActivated.rawValue, result:  [
-          "status": "activated",
-          "tokenId": pass.serialNumber
-        ]);
+      guard let secure = pass.secureElementPass else {
+        self.logInfo(message: "Pass without secureElementPass: serial=\(pass.serialNumber)")
+        continue
       }
+      let status = mapActivationState(secure.passActivationState)
+      self.logInfo(message: "Emitting onCardActivated: status=\(status) serial=\(pass.serialNumber)")
+      delegate?.sendEvent(name: Event.onCardActivated.rawValue, result: [
+        "status": status,
+        "tokenId": pass.serialNumber
+      ])
+    }
+  }
+
+  private func mapActivationState(_ state: PKSecureElementPass.PassActivationState) -> String {
+    switch state {
+    case .activated: return "activated"
+    case .requiresActivation: return "requiresActivation"
+    case .activating: return "pending"
+    case .suspended: return "suspended"
+    case .deactivated: return "deactivated"
+    @unknown default: return "unknown"
     }
   }
 
@@ -167,7 +202,7 @@ open class WalletManager: UIViewController {
       self.logInfo(message: "No passes found in Wallet.")
       return -1
     }
-    
+
     for pass in paymentPasses {
       guard let securePassElement = pass.secureElementPass else { continue }
       if condition(securePassElement) {
@@ -187,6 +222,28 @@ open class WalletManager: UIViewController {
     return getPassActivationState { pass in
       return pass.primaryAccountIdentifier == identifier as String
     }
+  }
+
+  @objc public func listPasses() -> NSArray {
+    let allPasses = passLibrary.passes()
+    self.logInfo(message: "DEBUG all passes count: \(allPasses.count)")
+    for pass in allPasses {
+      self.logInfo(message: "DEBUG pass type=\(pass.passType.rawValue) passTypeIdentifier=\(pass.passTypeIdentifier) serialNumber=\(pass.serialNumber)")
+    }
+
+    let paymentPasses = passLibrary.passes(of: .payment)
+    self.logInfo(message: "DEBUG payment passes count: \(paymentPasses.count)")
+    var results: [NSDictionary] = []
+    for pass in paymentPasses {
+      guard let secure = pass.secureElementPass else { continue }
+      results.append([
+        "identifier": secure.primaryAccountIdentifier ?? "",
+        "lastDigits": secure.primaryAccountNumberSuffix ?? "",
+        "tokenState": secure.passActivationState.rawValue,
+      ])
+    }
+
+    return results as NSArray
   }
   
   private func isPassKitAvailable() -> Bool {
@@ -247,42 +304,90 @@ extension WalletManager: PKAddPaymentPassViewControllerDelegate {
       if addPassViewController == nil {
         return
       }
-      
-      let errorMessage = error?.localizedDescription ?? ""
 
-      if error != nil {
-        self.logInfo(message: "Error: \(errorMessage)")
+      let errorInfo = describePassKitError(error)
+
+      if let error = error {
+        self.logInfo(message: "PassKit error: domain=\(errorInfo["errorDomain"] ?? "") code=\(errorInfo["errorCode"] ?? "") reason=\(errorInfo["errorReason"] ?? "") description=\(error.localizedDescription)")
         delegate?.sendEvent(name: Event.onCardActivated.rawValue, result:  [
           "status": "canceled"
         ]);
       }
-      
+
       // Cancel the IOSPresentAddPaymentPassView function when the user cancelled the modal
       if let handler = presentAddPaymentPassCompletionHandler {
         let response = AddPassResponse(status: .canceled, nonce: nil, nonceSignature: nil, certificates: nil)
         handler(.canceled, response.toNSDictionary())
       }
-      
+
       // If the pass is returned complete the IOSHandleAddPaymentPassResponse function
       if let addPaymentPassHandler = addPaymentPassCompletionHandler {
         if pass != nil {
           addPaymentPassHandler(.completed, nil)
         } else {
-          addPaymentPassHandler(.error, [
-            "errorMessage": "Could not add card. \(errorMessage))."
-          ])
+          let reason = errorInfo["errorReason"] as? String ?? "unknownError"
+          let description = (error?.localizedDescription).map { ": \($0)" } ?? ""
+          var payload: [String: Any] = [
+            "errorMessage": "Could not add card (\(reason))\(description)"
+          ]
+          payload.merge(errorInfo) { current, _ in current }
+          addPaymentPassHandler(.error, payload as NSDictionary)
         }
       }
-      
+
       hideModal()
       addPaymentPassCompletionHandler = nil
       presentAddPaymentPassCompletionHandler = nil
     }
+
+  private func describePassKitError(_ error: Error?) -> [String: Any] {
+    guard let error = error else { return [:] }
+    let nsError = error as NSError
+
+    var info: [String: Any] = [
+      "errorDomain": nsError.domain,
+      "errorCode": nsError.code,
+      "errorDescription": nsError.localizedDescription
+    ]
+
+    if nsError.domain == PKPassKitErrorDomain {
+      info["errorReason"] = passKitErrorReason(code: nsError.code)
+    }
+
+    if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+      info["underlyingDomain"] = underlying.domain
+      info["underlyingCode"] = underlying.code
+      info["underlyingDescription"] = underlying.localizedDescription
+    }
+
+    if let failureReason = nsError.localizedFailureReason {
+      info["failureReason"] = failureReason
+    }
+    if let recovery = nsError.localizedRecoverySuggestion {
+      info["recoverySuggestion"] = recovery
+    }
+
+    return info
+  }
+
+  private func passKitErrorReason(code: Int) -> String {
+    // Maps PKAddPaymentPassError raw values to readable reasons.
+    // Apple does not expose every PKPassKitErrorDomain code as an enum,
+    // so unknown codes fall through to a generic label.
+    switch code {
+    case 0: return "unknownError"
+    case 1: return "userCancelled"
+    case 2: return "invalidSignature"
+    case 3: return "notEntitled"
+    default: return "passKitError(\(code))"
+    }
+  }
 }
 
 extension WalletManager {
   enum Event: String, CaseIterable {
     case onCardActivated
+    case onCardRemoved
   }
 
   @objc

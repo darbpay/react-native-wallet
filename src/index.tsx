@@ -11,6 +11,7 @@ import type {
   IOSEncryptPayload,
   AndroidWalletData,
   onCardActivatedPayload,
+  onCardRemovedPayload,
   IOSAddPaymentPassData,
   TokenInfo,
 } from './NativeWallet';
@@ -21,9 +22,75 @@ function getModuleLinkingRejection() {
   return Promise.reject(new Error(`Failed to load Wallet module, make sure to link ${PACKAGE_NAME} correctly`));
 }
 
+type WalletErrorDetails = {
+  code?: string;
+  errorDomain?: string;
+  errorCode?: number;
+  errorReason?: string;
+  errorDescription?: string;
+  failureReason?: string;
+  recoverySuggestion?: string;
+  underlyingDomain?: string;
+  underlyingCode?: number;
+  underlyingDescription?: string;
+};
+
+class WalletError extends Error {
+  code?: string;
+
+  errorDomain?: string;
+
+  errorCode?: number;
+
+  errorReason?: string;
+
+  errorDescription?: string;
+
+  failureReason?: string;
+
+  recoverySuggestion?: string;
+
+  underlyingDomain?: string;
+
+  underlyingCode?: number;
+
+  underlyingDescription?: string;
+
+  cause?: unknown;
+
+  constructor(message: string, details: WalletErrorDetails, cause?: unknown) {
+    super(message);
+    this.name = 'WalletError';
+    this.cause = cause;
+    Object.assign(this, details);
+  }
+}
+
+function toWalletError(err: unknown): WalletError {
+  // React Native rejects from native modules surface as objects with `code`, `message`, and
+  // `userInfo` (the NSError userInfo dictionary). Pull the structured fields up so callers
+  // can branch on `errorReason` / `errorCode` directly without poking into userInfo.
+  const e = err as {code?: string; message?: string; userInfo?: Record<string, unknown>} | undefined;
+  const userInfo = e?.userInfo ?? {};
+  const details: WalletErrorDetails = {
+    code: e?.code,
+    errorDomain: userInfo.errorDomain as string | undefined,
+    errorCode: userInfo.errorCode as number | undefined,
+    errorReason: userInfo.errorReason as string | undefined,
+    errorDescription: userInfo.errorDescription as string | undefined,
+    failureReason: userInfo.failureReason as string | undefined,
+    recoverySuggestion: userInfo.recoverySuggestion as string | undefined,
+    underlyingDomain: userInfo.underlyingDomain as string | undefined,
+    underlyingCode: userInfo.underlyingCode as number | undefined,
+    underlyingDescription: userInfo.underlyingDescription as string | undefined,
+  };
+  const message = e?.message || details.errorDescription || 'Wallet operation failed';
+  return new WalletError(message, details, err);
+}
+
 const eventEmitter = new NativeEventEmitter(Wallet);
 
-function addListener(event: string, callback: (data: onCardActivatedPayload) => void): EmitterSubscription {
+function addListener<T = onCardActivatedPayload | onCardRemovedPayload>(event: string, callback: (data: T) => void): EmitterSubscription {
   return eventEmitter.addListener(event, callback);
 }
 
@@ -111,17 +178,17 @@ async function resumeAddCardToGoogleWallet(cardData: AndroidResumeCardData): Pro
 }
 
 async function listTokens(): Promise<TokenInfo[]> {
-  if (Platform.OS === 'ios') {
-    return Promise.resolve([]);
-  }
-
   if (!Wallet) {
     return getModuleLinkingRejection();
   }
-  const isWalletInitialized = await Wallet.ensureGoogleWalletInitialized();
-  if (!isWalletInitialized) {
-    throw new Error('Wallet could not be initialized');
+
+  if (Platform.OS === 'android') {
+    const isWalletInitialized = await Wallet.ensureGoogleWalletInitialized();
+    if (!isWalletInitialized) {
+      throw new Error('Wallet could not be initialized');
+    }
   }
+
   return Wallet.listTokens();
 }
 
@@ -133,14 +200,24 @@ async function addCardToAppleWallet(
     throw new Error('addCardToAppleWallet is not available on Android');
   }
 
-  const passData = await Wallet?.IOSPresentAddPaymentPassView(cardData);
+  let passData: IOSAddPaymentPassData | undefined;
+  try {
+    passData = await Wallet?.IOSPresentAddPaymentPassView(cardData);
+  } catch (err) {
+    throw toWalletError(err);
+  }
   if (!passData || passData.status !== 0) {
     return getTokenizationStatus(passData?.status || -1);
   }
 
   async function addPaymentPassToWallet(paymentPassData: IOSAddPaymentPassData): Promise<number> {
     const responseData = await issuerEncryptPayloadCallback(paymentPassData.nonce, paymentPassData.nonceSignature, paymentPassData.certificates);
-    const response = await Wallet?.IOSHandleAddPaymentPassResponse(responseData);
+    let response: IOSAddPaymentPassData | null | undefined;
+    try {
+      response = await Wallet?.IOSHandleAddPaymentPassResponse(responseData);
+    } catch (err) {
+      throw toWalletError(err);
+    }
     // Response is null when a pass is successfully added to the wallet or the user cancels the process
     // In case the user presses the `Try again` option, new pass data is returned, and it should reenter the function
     if (response) {
@@ -152,7 +229,18 @@ async function addCardToAppleWallet(
   return getTokenizationStatus(status);
 }
 
-export type {AndroidCardData, AndroidWalletData, CardStatus, IOSEncryptPayload, IOSCardData, IOSAddPaymentPassData, onCardActivatedPayload, TokenizationStatus, TokenInfo};
+export type {
+  AndroidCardData,
+  AndroidWalletData,
+  CardStatus,
+  IOSEncryptPayload,
+  IOSCardData,
+  IOSAddPaymentPassData,
+  onCardActivatedPayload,
+  onCardRemovedPayload,
+  TokenizationStatus,
+  TokenInfo,
+};
 export {
   AddToWalletButton,
   checkWalletAvailability,
@@ -165,4 +253,5 @@ export {
   addCardToAppleWallet,
   addListener,
   removeListener,
+  WalletError,
 };

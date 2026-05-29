@@ -194,6 +194,7 @@ The library offers seven functions for seamless integration and use of the Apple
 | **UserAddress** | Structured address used for cardholder verification. | `name: string`,<br>`addressOne: string`,<br>`addressTwo: string`,<br>`city: string`,<br>`administrativeArea: string`,<br>`countryCode: string`,<br>`postalCode: string`,<br>`phoneNumber: string` |
 | **IOSCardData** | Data related to a card that is to be added on iOS platform. | `network: string`,<br>`activationData: string`,<br>`encryptedPassData: string`,<br>`ephemeralPublicKey: string`,<br>`cardHolderTitle: string`,<br>`cardHolderName: string`,<br>`lastDigits: string`,<br>`cardDescription: string`,<br>`cardDescriptionComment: string` |
 | **onCardActivatedPayload** | Data used by listener to notice when a card's status changes. | `tokenId: string`,<br> `status: 'activated' \| 'canceled'`<br> |
+| **onCardRemovedPayload** | Data used by listener to notice when a pass is removed from Apple Wallet (iOS only). | `tokenId: string`,<br> `passTypeIdentifier: string`<br> |
 | **IOSIssuerCallback** | This callback is invoked with a nonce, its signature, and a certificate array obtained from Apple. It is expected that you will forward these details to your server or the card issuer's API to securely encrypt the payload required for adding cards to the Apple Wallet. | `(nonce: string, nonceSignature: string, certificate: string[]) => IOSEncryptPayload` |
 | **IOSEncryptPayload** | An object containing the necessary elements to complete the addition of a card to Apple Wallet. | `encryptedPassData: string`,<br>`activationData: string`,<br>`ephemeralPublicKey: string` |
 | **TokenInfo** | Information about a token stored in Google Wallet. | `identifier: string`,<br>`lastDigits: string`,<br>`tokenState: number` |
@@ -209,6 +210,7 @@ The library offers seven functions for seamless integration and use of the Apple
 | Listener | Event Description | Register Function | Unregister Function |
 |----------|-------------------|-------------------|---------------------|
 | **_cardActivation_** | Notifies when a card's status changes to activated. | `addListener(event: string, callback: (data: onCardActivatedPayload) => void): EmitterSubscription` | `removeListener(subscription: EmitterSubscription): void` |
+| **_cardRemoved_** | Notifies when a pass is removed from Apple Wallet (iOS only). Subscribe with event name `'onCardRemoved'`. | `addListener<onCardRemovedPayload>(event: string, callback: (data: onCardRemovedPayload) => void): EmitterSubscription` | `removeListener(subscription: EmitterSubscription): void` |
 
 ## Components
 

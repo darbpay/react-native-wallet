@@ -93,12 +93,25 @@ RCT_REMAP_METHOD(getCardStatusByIdentifier,
   resolve([walletManager getCardStatusByIdentifierWithIdentifier:identifier]);
 }
 
-- (void)addCardToGoogleWallet:(JS::NativeWallet::AndroidCardData &)cardData resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject { 
-  // no-op
+- (void)addCardToGoogleWallet:(JS::NativeWallet::AndroidCardData &)cardData resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  // no-op (Android only)
+}
+
+- (void)resumeAddCardToGoogleWallet:(JS::NativeWallet::AndroidResumeCardData &)cardData resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  // no-op (Android only)
+}
+
+- (void)ensureGoogleWalletInitialized:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  // no-op (Android only)
+  resolve(@(NO));
 }
 
 - (void)getSecureWalletInfo:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
-  // no-op
+  // no-op (Android only)
+}
+
+- (void)listTokens:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  resolve([walletManager listPasses]);
 }
 
 - (NSArray<NSString *> *)supportedEvents {
@@ -113,7 +126,19 @@ RCT_REMAP_METHOD(getCardStatusByIdentifier,
                        code:(NSInteger)code
                 description:(NSString *)description
                    rejecter:(RCTPromiseRejectBlock)reject {
-  NSDictionary *userInfo = @{NSLocalizedDescriptionKey: description};
+  [self rejectWithErrorType:type code:code description:description extra:nil rejecter:reject];
+}
+
+- (void)rejectWithErrorType:(NSString *)type
+                       code:(NSInteger)code
+                description:(NSString *)description
+                      extra:(NSDictionary *)extra
+                   rejecter:(RCTPromiseRejectBlock)reject {
+  NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
+  userInfo[NSLocalizedDescriptionKey] = description;
+  if (extra) {
+    [userInfo addEntriesFromDictionary:extra];
+  }
   NSString *errorWithDomain = walletManager.packageName;
   NSError *error = [NSError errorWithDomain:errorWithDomain
                                        code:code
@@ -133,7 +158,13 @@ RCT_REMAP_METHOD(getCardStatusByIdentifier,
     resolve(data);
   } else {
     NSString *errorMessage = data[@"errorMessage"] ?: defaultErrorMsg ?: @"Operation failed";
-    [self rejectWithErrorType:errorPrefix code:1001 description:errorMessage rejecter:reject];
+    NSMutableDictionary *extra = [NSMutableDictionary dictionary];
+    for (NSString *key in data) {
+      if (![key isEqualToString:@"errorMessage"]) {
+        extra[key] = data[key];
+      }
+    }
+    [self rejectWithErrorType:errorPrefix code:1001 description:errorMessage extra:extra rejecter:reject];
   }
 }
 
