@@ -501,8 +501,18 @@ function addExtensionTarget(project: XcodeProject, ext: ResolvedExtensionConfig,
   project.addTargetDependency(project.getFirstTarget().uuid, [target.uuid]);
 
   // Target-specific build settings.
+  //
+  // `IPHONEOS_DEPLOYMENT_TARGET` is intentionally NOT set here — the target
+  // inherits the project-level deployment target, which CocoaPods uses for
+  // every pod in the workspace (including this extension's own pod). Setting
+  // it to a lower value than the project causes "compiling for iOS X, but
+  // module 'react_native_wallet_extension' has a minimum deployment target of
+  // iOS Y" because Swift refuses to import a `.swiftmodule` built for a
+  // higher OS than the consumer. The iOS 14.0 floor required by
+  // PKIssuerProvisioningExtensionHandler is enforced separately via
+  // `s.platforms = { :ios => "14.0" }` in the podspec, and via
+  // `@available(iOS 14.0, *)` on the generated subclass.
   setTargetBuildSettings(project, target.uuid, {
-    IPHONEOS_DEPLOYMENT_TARGET: '14.0',
     SWIFT_VERSION: '5.0',
     TARGETED_DEVICE_FAMILY: '"1,2"',
     GENERATE_INFOPLIST_FILE: 'NO',
@@ -536,4 +546,4 @@ function setTargetBuildSettings(project: XcodeProject, targetUuid: string, setti
   });
 }
 
-export default createRunOncePlugin(withReactNativeWallet, 'ReactNativeWallet', '0.2.4');
+export default createRunOncePlugin(withReactNativeWallet, 'ReactNativeWallet', '0.2.5');
