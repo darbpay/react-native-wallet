@@ -8,7 +8,7 @@ struct CardInfo {
 
   init(cardData: NSDictionary) throws {
     guard let networkString = cardData["network"] as? String, !networkString.isEmpty,
-          let network = CardInfo.getNetwork(from: networkString),
+          let network = PaymentNetworkMapper.paymentNetwork(from: networkString),
           let cardHolderName = cardData["cardHolderName"] as? String, !cardHolderName.isEmpty,
           let lastDigits = cardData["lastDigits"] as? String, !lastDigits.isEmpty,
           let cardDescription = cardData["cardDescription"] as? String, !cardDescription.isEmpty else {
@@ -19,16 +19,6 @@ struct CardInfo {
     self.cardHolderName = cardHolderName
     self.lastDigits = lastDigits
     self.cardDescription = cardDescription
-  }
-
-  private static func getNetwork(from identifier: String) -> PKPaymentNetwork? {
-    switch identifier.lowercased() {
-    case "visa": return .visa
-    case "mastercard": return .masterCard
-    case "amex": return .amex
-    case "discover": return .discover
-    default: return nil
-    }
   }
 }
 

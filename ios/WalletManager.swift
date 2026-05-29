@@ -384,6 +384,61 @@ extension WalletManager: PKAddPaymentPassViewControllerDelegate {
   }
 }
 
+// MARK: - Wallet Extension cache (P0-2 §4.7)
+//
+// These setters let JS keep the App Group container fresh for the
+// PKIssuerProvisioningExtension. They delegate to the shared layer
+// (`EligibilityCache` / `SharedKeychain`). When the App Group is unconfigured
+// (consumer hasn't enabled the Expo plugin), `SharedAppGroup.identifier` is nil
+// and the shared helpers no-op, so these stay backward compatible.
+//
+// Each returns an error message String (nil on success) so the Obj-C bridge can
+// resolve/reject without an NSError out-parameter.
+extension WalletManager {
+  @objc public func setWalletExtensionEligibleCards(cardsJson: NSString) -> NSString? {
+    guard let data = (cardsJson as String).data(using: .utf8) else {
+      return "invalid_cards_json_encoding"
+    }
+    do {
+      let cards = try JSONDecoder().decode([EligibilityCard].self, from: data)
+      try EligibilityCache.write(cards)
+      return nil
+    } catch {
+      return "eligible_cards_write_failed: \(error.localizedDescription)" as NSString
+    }
+  }
+
+  @objc public func clearWalletExtensionEligibleCards() {
+    EligibilityCache.clear()
+  }
+
+  @objc public func setWalletExtensionAuthToken(token: NSString, expiresAtMs: Double) -> NSString? {
+    let expiresAt = Date(timeIntervalSince1970: expiresAtMs / 1000.0)
+    do {
+      try SharedKeychain.setAuthToken(token as String, expiresAt: expiresAt)
+      return nil
+    } catch {
+      return "auth_token_write_failed: \(error.localizedDescription)" as NSString
+    }
+  }
+
+  @objc public func clearWalletExtensionAuthToken() {
+    SharedKeychain.clearAuthToken()
+  }
+
+  @objc public func setWalletExtensionCardArt(cardId: NSString, scale: Int, pngBase64: NSString) -> NSString? {
+    guard let pngData = Data(base64Encoded: pngBase64 as String) else {
+      return "invalid_card_art_base64"
+    }
+    do {
+      try EligibilityCache.writeCardArt(cardId: cardId as String, scale: scale, pngData: pngData)
+      return nil
+    } catch {
+      return "card_art_write_failed: \(error.localizedDescription)" as NSString
+    }
+  }
+}
+
 extension WalletManager {
   enum Event: String, CaseIterable {
     case onCardActivated

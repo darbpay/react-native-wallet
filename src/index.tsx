@@ -14,6 +14,7 @@ import type {
   onCardRemovedPayload,
   IOSAddPaymentPassData,
   TokenInfo,
+  EligibilityCard,
 } from './NativeWallet';
 import {getCardState, getTokenizationStatus} from './utils';
 import AddToWalletButton from './AddToWalletButton';
@@ -229,6 +230,94 @@ async function addCardToAppleWallet(
   return getTokenizationStatus(status);
 }
 
+/**
+ * Wallet-app-initiated provisioning extension cache (P0-2 §4.7) — iOS only.
+ *
+ * The host app calls these to keep the App Group container fresh so the
+ * PKIssuerProvisioningExtension can answer Apple's eligibility queries without
+ * the app running. See `EligibilityCard` for the two-identifier rule.
+ */
+async function setWalletExtensionEligibleCards(cards: EligibilityCard[]): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('setWalletExtensionEligibleCards is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    // Native owns the on-disk schema (incl. writtenAt) via Codable; we only
+    // hand over the cards array as JSON.
+    await Wallet.setWalletExtensionEligibleCards(JSON.stringify(cards));
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
+async function clearWalletExtensionEligibleCards(): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('clearWalletExtensionEligibleCards is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    await Wallet.clearWalletExtensionEligibleCards();
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
+/**
+ * Persists the Clerk session token and its absolute expiry (ms since epoch) to
+ * the shared keychain. The extension uses the expiry to judge token validity
+ * locally within its sub-100ms status budget.
+ */
+async function setWalletExtensionAuthToken(token: string, expiresAtMs: number): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('setWalletExtensionAuthToken is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    await Wallet.setWalletExtensionAuthToken(token, expiresAtMs);
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
+async function clearWalletExtensionAuthToken(): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('clearWalletExtensionAuthToken is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    await Wallet.clearWalletExtensionAuthToken();
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
+/**
+ * Persists a card-art PNG thumbnail at the given screen scale (1, 2, or 3).
+ * `pngBase64` is the raw base64 of the PNG bytes (no data: URI prefix).
+ */
+async function setWalletExtensionCardArt(cardId: string, scale: 1 | 2 | 3, pngBase64: string): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('setWalletExtensionCardArt is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    await Wallet.setWalletExtensionCardArt(cardId, scale, pngBase64);
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
 export type {
   AndroidCardData,
   AndroidWalletData,
@@ -240,6 +329,7 @@ export type {
   onCardRemovedPayload,
   TokenizationStatus,
   TokenInfo,
+  EligibilityCard,
 };
 export {
   AddToWalletButton,
@@ -251,6 +341,11 @@ export {
   resumeAddCardToGoogleWallet,
   listTokens,
   addCardToAppleWallet,
+  setWalletExtensionEligibleCards,
+  clearWalletExtensionEligibleCards,
+  setWalletExtensionAuthToken,
+  clearWalletExtensionAuthToken,
+  setWalletExtensionCardArt,
   addListener,
   removeListener,
   WalletError,

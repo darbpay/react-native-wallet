@@ -74,6 +74,28 @@ type TokenInfo = {
   tokenState: number;
 };
 
+/**
+ * A card the host app marks as eligible for the Wallet-app-initiated
+ * provisioning extension (P0-2 §4.7). Cached in the App Group container for the
+ * extension to read.
+ *
+ * Two-identifier rule:
+ *  - `cardId` — DarbPay's internal card id. Used as the PassKit entry
+ *    identifier AND as the `{cardId}` segment of the encrypt endpoint.
+ *  - `panId` — Apple `primaryAccountIdentifier` (from the Emcrey `token.added`
+ *    webhook). Used ONLY to dedupe against passes already on the device/Watch.
+ *    Null until the card has been provisioned at least once.
+ */
+type EligibilityCard = {
+  cardId: string;
+  panId?: string | null;
+  last4: string;
+  displayName: string;
+  cardholderName: string;
+  network: string;
+  eligibleAt: string;
+};
+
 export interface Spec extends TurboModule {
   checkWalletAvailability(): Promise<boolean>;
   ensureGoogleWalletInitialized(): Promise<boolean>;
@@ -85,6 +107,14 @@ export interface Spec extends TurboModule {
   listTokens(): Promise<TokenInfo[]>;
   IOSPresentAddPaymentPassView(cardData: IOSCardData): Promise<IOSAddPaymentPassData>;
   IOSHandleAddPaymentPassResponse(payload: IOSEncryptPayload): Promise<IOSAddPaymentPassData | null>;
+  // Wallet-app-initiated provisioning extension cache (P0-2 §4.7, iOS only).
+  // `cardsJson` is a JSON-encoded EligibilityCard[]; the native layer owns the
+  // on-disk schema (incl. the `writtenAt` timestamp) via Codable.
+  setWalletExtensionEligibleCards(cardsJson: string): Promise<void>;
+  clearWalletExtensionEligibleCards(): Promise<void>;
+  setWalletExtensionAuthToken(token: string, expiresAtMs: number): Promise<void>;
+  clearWalletExtensionAuthToken(): Promise<void>;
+  setWalletExtensionCardArt(cardId: string, scale: number, pngBase64: string): Promise<void>;
   addListener: (eventType: string) => void;
   removeListeners: (count: number) => void;
 }
@@ -118,4 +148,5 @@ export type {
   IOSEncryptPayload,
   TokenizationStatus,
   TokenInfo,
+  EligibilityCard,
 };
