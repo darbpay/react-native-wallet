@@ -48,7 +48,17 @@ Pod::Spec.new do |s|
   # React Native's binary surface (RN runtime + extension-prohibited APIs fail
   # App Store review), so this subspec depends ONLY on PassKit + Foundation.
   # PKIssuerProvisioningExtensionHandler requires iOS 14.0+.
+  #
+  # Distinct `module_name` is required: without it, the WalletExtension
+  # subspec inherits the pod's default module name (`react_native_wallet`)
+  # and CocoaPods generates two modulemaps with the same module name in the
+  # same Pods/react-native-wallet directory. The extension target then sees
+  # both (Core's via the host target's inherited search paths, plus its own)
+  # and fails to compile with "Redefinition of module 'react_native_wallet'".
+  # The generated extension subclass in the consumer app must therefore
+  # `import react_native_wallet_extension` (the plugin emits this).
   s.subspec "WalletExtension" do |ss|
+    ss.module_name   = "react_native_wallet_extension"
     ss.platforms     = { :ios => "14.0" }
     ss.source_files  = "ios/shared/**/*.swift", "ios/extension/**/*.swift"
     ss.frameworks    = "PassKit", "Foundation", "CoreGraphics", "ImageIO", "Security"
