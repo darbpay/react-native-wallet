@@ -307,7 +307,7 @@ const withExtensionPodfile: ConfigPlugin<ResolvedExtensionConfig> = (config, ext
     const podBlock = [
       `target '${ext.targetName}' do`,
       `  inherit! :search_paths`,
-      `  pod 'react-native-wallet/WalletExtension', :path => '../node_modules/@darbpay/react-native-wallet'`,
+      `  pod 'react-native-wallet-extension', :path => '../node_modules/@darbpay/react-native-wallet'`,
       `end`,
     ].join('\n');
 
@@ -536,4 +536,4 @@ function setTargetBuildSettings(project: XcodeProject, targetUuid: string, setti
   });
 }
 
-export default createRunOncePlugin(withReactNativeWallet, 'ReactNativeWallet', '0.2.3');
+export default createRunOncePlugin(withReactNativeWallet, 'ReactNativeWallet', '0.2.4');
