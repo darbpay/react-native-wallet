@@ -304,9 +304,27 @@ const withExtensionXcodeTarget: ConfigPlugin<ResolvedExtensionConfig> = (config,
 const withExtensionPodfile: ConfigPlugin<ResolvedExtensionConfig> = (config, ext) =>
   withPodfile(config, (cfg) => {
     const tag = 'react-native-wallet-extension-target';
+    // `inherit! :none`: the extension target deliberately does NOT inherit
+    // the parent's pods, search paths, or linker flags. With the default
+    // (or `:search_paths`) inherit mode, the extension's xcconfig ends up
+    // with `-framework "React"` etc. from the parent — which App Store
+    // review rejects for app-extension binaries.
+    //
+    // The `autolinking_manager` override is required separately:
+    // `use_expo_modules!` on the host attaches an autolinking manager to
+    // its target_definition, and that's inherited via the
+    // target_definition.parent chain (see
+    // expo-modules-autolinking/scripts/ios/cocoapods/target_definition.rb).
+    // Without this override, `expo-modules-autolinking`'s post-install hook
+    // generates an `ExpoModulesProvider.swift` for the extension target
+    // that imports ExpoCamera / ExpoNotifications / etc., causing
+    // "Undefined symbols … ExpoCamera.CameraViewModule" at link time.
     const podBlock = [
       `target '${ext.targetName}' do`,
-      `  inherit! :search_paths`,
+      `  inherit! :none`,
+      `  current_target_definition.autolinking_manager = Object.new.tap do |o|`,
+      `    def o.should_generate_modules_provider?; false; end`,
+      `  end`,
       `  pod 'react-native-wallet-extension', :path => '../node_modules/@darbpay/react-native-wallet'`,
       `end`,
     ].join('\n');
@@ -546,4 +564,4 @@ function setTargetBuildSettings(project: XcodeProject, targetUuid: string, setti
   });
 }
 
-export default createRunOncePlugin(withReactNativeWallet, 'ReactNativeWallet', '0.2.5');
+export default createRunOncePlugin(withReactNativeWallet, 'ReactNativeWallet', '0.2.6');
