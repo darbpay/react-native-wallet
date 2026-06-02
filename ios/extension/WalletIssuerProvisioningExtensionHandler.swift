@@ -128,9 +128,15 @@ import PassKit
       configuration.cardholderName = card.cardholderName
       configuration.primaryAccountSuffix = card.last4
       configuration.localizedDescription = card.displayName
-      if let network = PaymentNetworkMapper.paymentNetwork(from: card.network) {
-        configuration.paymentNetwork = network
-      }
+      // `paymentNetwork` is intentionally NOT set here — match the in-app
+      // `PKAddPaymentPassViewController` flow exactly, which sets only the
+      // three fields above. Apple's tokenization service treats
+      // `configuration.paymentNetwork` as a contract that must match the
+      // encrypted payload; asserting it and getting it wrong (or having any
+      // mismatch with what the issuer registered) triggers the user-facing
+      // "Card Not Added — Contact your card issuer for more information"
+      // error at activation time. Letting PassKit infer the network from
+      // the encrypted payload is the safer default.
 
       let art = EligibilityCache.cardArtImage(cardId: card.cardId) ?? Self.placeholderArt()
       return PKIssuerProvisioningExtensionPaymentPassEntry(
