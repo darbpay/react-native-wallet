@@ -196,22 +196,33 @@ open class WalletManager: UIViewController {
     self.addPassHandler = nil
   }
   
+  // Yields every payment-capable pass the issuer is entitled to read — iPhone
+  // local passes (via `passes()` per Apple §7.3, iOS 13.4+) and paired Apple
+  // Watch passes (via `remoteSecureElementPasses`). Watch passes are flagged so
+  // callers can distinguish iPhone vs Watch when they need to.
+  private func allSecureElementPasses() -> [(pass: PKSecureElementPass, isRemote: Bool)] {
+    let localPasses = passLibrary.passes().compactMap { pass -> PKSecureElementPass? in
+      return pass.secureElementPass
+    }
+    let remotePasses = passLibrary.remoteSecureElementPasses
+    return localPasses.map { ($0, false) } + remotePasses.map { ($0, true) }
+  }
+
   private func getPassActivationState(matching condition: (PKSecureElementPass) -> Bool) -> NSNumber {
-    let paymentPasses = passLibrary.passes(of: .payment)
-    if paymentPasses.isEmpty {
+    let passes = allSecureElementPasses()
+    if passes.isEmpty {
       self.logInfo(message: "No passes found in Wallet.")
       return -1
     }
 
-    for pass in paymentPasses {
-      guard let securePassElement = pass.secureElementPass else { continue }
-      if condition(securePassElement) {
-        return NSNumber(value: securePassElement.passActivationState.rawValue)
+    for entry in passes {
+      if condition(entry.pass) {
+        return NSNumber(value: entry.pass.passActivationState.rawValue)
       }
     }
     return -1
   }
-  
+
   @objc public func getCardStatusBySuffix(last4Digits: NSString) -> NSNumber {
     return getPassActivationState { pass in
       return pass.primaryAccountNumberSuffix.hasSuffix(last4Digits as String)
@@ -224,22 +235,53 @@ open class WalletManager: UIViewController {
     }
   }
 
-  @objc public func listPasses() -> NSArray {
-    let allPasses = passLibrary.passes()
-    self.logInfo(message: "DEBUG all passes count: \(allPasses.count)")
-    for pass in allPasses {
-      self.logInfo(message: "DEBUG pass type=\(pass.passType.rawValue) passTypeIdentifier=\(pass.passTypeIdentifier) serialNumber=\(pass.serialNumber)")
-    }
+  // Wraps Apple §7.5 canonical signal `PKPassLibrary.canAddSecureElementPass`.
+  // Returns true only when the card is not yet provisioned to this iPhone or
+  // any paired Apple Watch — the right check for whether to show the Add
+  // to Apple Wallet button.
+  @objc public func canAddCardWithIdentifier(identifier: NSString) -> NSNumber {
+    let canAdd = passLibrary.canAddSecureElementPass(primaryAccountIdentifier: identifier as String)
+    return NSNumber(value: canAdd)
+  }
 
+  // Diagnostic: snapshot of every counter PassKit exposes about pass visibility,
+  // so callers can distinguish between "no entitlement / not allow-listed"
+  // (counts all zero, canAddPaymentPass possibly false) and "entitlement OK but
+  // PNO bundle-id mismatch" (allPasses > 0, paymentPasses == 0). Verbose by
+  // design — meant for one-off debugging, not steady-state polling.
+  @objc public func debugPassLibraryState() -> NSDictionary {
+    let allPasses = passLibrary.passes()
     let paymentPasses = passLibrary.passes(of: .payment)
-    self.logInfo(message: "DEBUG payment passes count: \(paymentPasses.count)")
+    let remotePasses = passLibrary.remoteSecureElementPasses
+    return [
+      "canAddPaymentPass": PKAddPaymentPassViewController.canAddPaymentPass(),
+      "allPassesCount": allPasses.count,
+      "paymentPassesCount": paymentPasses.count,
+      "remoteSecureElementPassesCount": remotePasses.count,
+      "allPassTypeIdentifiers": allPasses.map { $0.passTypeIdentifier },
+    ]
+  }
+
+  // PassKit sometimes returns `primaryAccountNumberSuffix` with a leading
+  // "x"/"X" (e.g. "x1234" instead of "1234"). The activation-state lookup uses
+  // `hasSuffix`, which absorbs the prefix, but `listPasses` exposes the raw
+  // value to JS — strip it here so consumers can safely `===`-compare.
+  private static func normalizedSuffix(_ raw: String?) -> String {
+    guard let raw else { return "" }
+    if raw.first == "x" || raw.first == "X" { return String(raw.dropFirst()) }
+    return raw
+  }
+
+  @objc public func listPasses() -> NSArray {
+    let passes = allSecureElementPasses()
+    self.logInfo(message: "DEBUG secure element passes count: \(passes.count) (local + remote)")
     var results: [NSDictionary] = []
-    for pass in paymentPasses {
-      guard let secure = pass.secureElementPass else { continue }
+    for entry in passes {
       results.append([
-        "identifier": secure.primaryAccountIdentifier ?? "",
-        "lastDigits": secure.primaryAccountNumberSuffix ?? "",
-        "tokenState": secure.passActivationState.rawValue,
+        "identifier": entry.pass.primaryAccountIdentifier ?? "",
+        "lastDigits": Self.normalizedSuffix(entry.pass.primaryAccountNumberSuffix),
+        "tokenState": entry.pass.passActivationState.rawValue,
+        "isRemote": entry.isRemote,
       ])
     }
 

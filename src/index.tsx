@@ -146,6 +146,66 @@ async function getCardStatusByIdentifier(identifier: string, tsp: string): Promi
   return getCardState(tokenState);
 }
 
+/**
+ * iOS only. Preferred per Apple §7.5 — wraps
+ * `PKPassLibrary.canAddSecureElementPass(primaryAccountIdentifier:)`. Returns
+ * `true` only when the card is not yet provisioned to this iPhone or any
+ * paired Apple Watch, i.e. when the Add to Apple Wallet button should be
+ * shown. Resolves `false` on Android (Google Wallet has its own checks).
+ *
+ * @param identifier - Apple `primaryAccountIdentifier` (FPANID), available
+ *   from the PNO after the first provisioning of a card.
+ */
+async function canAddCardWithIdentifier(identifier: string): Promise<boolean> {
+  if (Platform.OS === 'android') {
+    return false;
+  }
+
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+
+  return Wallet.canAddCardWithIdentifier(identifier);
+}
+
+/**
+ * iOS-only diagnostic. Snapshots every counter PassKit exposes about pass
+ * visibility so callers can distinguish between:
+ *   - no entitlement / not on Apple's allow list — `allPassesCount === 0`
+ *     and `canAddPaymentPass` may be false. Wallet hides everything from
+ *     this build.
+ *   - entitlement OK but PNO `associatedApplicationIdentifiers` mismatch —
+ *     `allPassesCount > 0` (boarding passes etc.) but `paymentPassesCount === 0`.
+ *   - Simulator — always returns zeros, no Secure Element.
+ *
+ * Resolves zeros on Android (no PassKit).
+ */
+type PassLibraryDebugState = {
+  canAddPaymentPass: boolean;
+  allPassesCount: number;
+  paymentPassesCount: number;
+  remoteSecureElementPassesCount: number;
+  allPassTypeIdentifiers: string[];
+};
+
+async function debugPassLibraryState(): Promise<PassLibraryDebugState> {
+  if (Platform.OS === 'android') {
+    return {
+      canAddPaymentPass: false,
+      allPassesCount: 0,
+      paymentPassesCount: 0,
+      remoteSecureElementPassesCount: 0,
+      allPassTypeIdentifiers: [],
+    };
+  }
+
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+
+  return Wallet.debugPassLibraryState();
+}
+
 async function addCardToGoogleWallet(cardData: AndroidCardData): Promise<TokenizationStatus> {
   if (Platform.OS === 'ios') {
     throw new Error('addCardToGoogleWallet is not available on iOS');
@@ -337,6 +397,8 @@ export {
   getSecureWalletInfo,
   getCardStatusBySuffix,
   getCardStatusByIdentifier,
+  canAddCardWithIdentifier,
+  debugPassLibraryState,
   addCardToGoogleWallet,
   resumeAddCardToGoogleWallet,
   listTokens,

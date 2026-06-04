@@ -72,6 +72,10 @@ type TokenInfo = {
   identifier: string;
   lastDigits: string;
   tokenState: number;
+  // iOS only. true when this pass lives on a paired Apple Watch
+  // (`PKPassLibrary.remoteSecureElementPasses`), false for iPhone local passes.
+  // Always false on Android.
+  isRemote?: boolean;
 };
 
 /**
@@ -102,6 +106,14 @@ export interface Spec extends TurboModule {
   getSecureWalletInfo(): Promise<AndroidWalletData>;
   getCardStatusBySuffix(last4Digits: string): Promise<number>;
   getCardStatusByIdentifier(identifier: string, tsp: string): Promise<number>;
+  canAddCardWithIdentifier(identifier: string): Promise<boolean>;
+  debugPassLibraryState(): Promise<{
+    canAddPaymentPass: boolean;
+    allPassesCount: number;
+    paymentPassesCount: number;
+    remoteSecureElementPassesCount: number;
+    allPassTypeIdentifiers: string[];
+  }>;
   addCardToGoogleWallet(cardData: AndroidCardData): Promise<number>;
   resumeAddCardToGoogleWallet(cardData: AndroidResumeCardData): Promise<number>;
   listTokens(): Promise<TokenInfo[]>;

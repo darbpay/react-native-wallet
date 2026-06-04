@@ -181,6 +181,27 @@ class WalletModule internal constructor(context: ReactApplicationContext) :
   }
 
   @ReactMethod
+  override fun canAddCardWithIdentifier(identifier: String, promise: Promise) {
+    // iOS-only API — wraps PKPassLibrary.canAddSecureElementPass. The JS
+    // wrapper short-circuits to `false` on Android, so this is a defensive
+    // no-op in case it's ever called directly.
+    promise.resolve(false)
+  }
+
+  @ReactMethod
+  override fun debugPassLibraryState(promise: Promise) {
+    // iOS-only diagnostic. The JS wrapper short-circuits on Android; this is
+    // a defensive no-op in case it's ever called directly.
+    val result = Arguments.createMap()
+    result.putBoolean("canAddPaymentPass", false)
+    result.putInt("allPassesCount", 0)
+    result.putInt("paymentPassesCount", 0)
+    result.putInt("remoteSecureElementPassesCount", 0)
+    result.putArray("allPassTypeIdentifiers", Arguments.createArray())
+    promise.resolve(result)
+  }
+
+  @ReactMethod
   override fun addCardToGoogleWallet(
     data: ReadableMap, promise: Promise
   ) {
