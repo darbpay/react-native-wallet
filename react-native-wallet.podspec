@@ -13,6 +13,13 @@ def $RNWallet._add_compiler_flags(sp, extra_flags)
   end
 end
 
+# Host-app React Native module — links React-Core and exposes the TurboModule
+# surface. Compiles everything under ios/ EXCEPT ios/extension/**, which is
+# extension-only and lives in the sibling `react-native-wallet-extension`
+# podspec (see file in the same directory). The two pods deliberately share
+# the ios/shared/** sources so the host-app TurboModule setters and the
+# extension handler agree on the App-Group JSON schema, keychain accessor,
+# encrypt-endpoint client, etc.
 Pod::Spec.new do |s|
   s.name         = "react-native-wallet"
   s.version      = package["version"]
@@ -24,12 +31,13 @@ Pod::Spec.new do |s|
   s.platforms    = { :ios => min_ios_version_supported }
   s.source       = { :git => "https://github.com/Expensify/react-native-wallet.git", :tag => "#{s.version}" }
 
-  s.source_files = "ios/**/*.{h,m,mm,cpp,swift}"
-  
+  s.source_files  = "ios/**/*.{h,m,mm,cpp,swift}"
+  s.exclude_files = "ios/extension/**/*"
+
   s.dependency "React-Core"
 
-  install_modules_dependencies(s);
-  
+  install_modules_dependencies(s)
+
   if ENV['USE_FRAMEWORKS']
     $RNWallet._add_compiler_flags(s, "-DRNWallet_USE_FRAMEWORKS=1")
   end

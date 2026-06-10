@@ -14,6 +14,7 @@ import type {
   onCardRemovedPayload,
   IOSAddPaymentPassData,
   TokenInfo,
+  EligibilityCard,
 } from './NativeWallet';
 import {getCardState, getTokenizationStatus} from './utils';
 import AddToWalletButton from './AddToWalletButton';
@@ -145,6 +146,85 @@ async function getCardStatusByIdentifier(identifier: string, tsp: string): Promi
   return getCardState(tokenState);
 }
 
+/**
+ * iOS only. Preferred per Apple §7.5 — wraps
+ * `PKPassLibrary.canAddSecureElementPass(primaryAccountIdentifier:)`. Returns
+ * `true` only when the card is not yet provisioned to this iPhone or any
+ * paired Apple Watch, i.e. when the Add to Apple Wallet button should be
+ * shown. Resolves `false` on Android (Google Wallet has its own checks).
+ *
+ * @param identifier - Apple `primaryAccountIdentifier` (FPANID), available
+ *   from the PNO after the first provisioning of a card.
+ */
+async function canAddCardWithIdentifier(identifier: string): Promise<boolean> {
+  if (Platform.OS === 'android') {
+    return false;
+  }
+
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+
+  return Wallet.canAddCardWithIdentifier(identifier);
+}
+
+/**
+ * iOS only. Resolves `true` when this iPhone is paired with an Apple Watch
+ * (`WCSession.isPaired`). Use it to decide whether to surface an "Add to Apple
+ * Watch" label for a card already on the iPhone. More reliable than inspecting
+ * `listTokens()` for remote passes, which is empty when the Watch is paired but
+ * holds no passes yet. Resolves `false` on Android.
+ */
+async function isWatchPaired(): Promise<boolean> {
+  if (Platform.OS === 'android') {
+    return false;
+  }
+
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+
+  return Wallet.isWatchPaired();
+}
+
+/**
+ * iOS-only diagnostic. Snapshots every counter PassKit exposes about pass
+ * visibility so callers can distinguish between:
+ *   - no entitlement / not on Apple's allow list — `allPassesCount === 0`
+ *     and `canAddPaymentPass` may be false. Wallet hides everything from
+ *     this build.
+ *   - entitlement OK but PNO `associatedApplicationIdentifiers` mismatch —
+ *     `allPassesCount > 0` (boarding passes etc.) but `paymentPassesCount === 0`.
+ *   - Simulator — always returns zeros, no Secure Element.
+ *
+ * Resolves zeros on Android (no PassKit).
+ */
+type PassLibraryDebugState = {
+  canAddPaymentPass: boolean;
+  allPassesCount: number;
+  paymentPassesCount: number;
+  remoteSecureElementPassesCount: number;
+  allPassTypeIdentifiers: string[];
+};
+
+async function debugPassLibraryState(): Promise<PassLibraryDebugState> {
+  if (Platform.OS === 'android') {
+    return {
+      canAddPaymentPass: false,
+      allPassesCount: 0,
+      paymentPassesCount: 0,
+      remoteSecureElementPassesCount: 0,
+      allPassTypeIdentifiers: [],
+    };
+  }
+
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+
+  return Wallet.debugPassLibraryState();
+}
+
 async function addCardToGoogleWallet(cardData: AndroidCardData): Promise<TokenizationStatus> {
   if (Platform.OS === 'ios') {
     throw new Error('addCardToGoogleWallet is not available on iOS');
@@ -229,6 +309,94 @@ async function addCardToAppleWallet(
   return getTokenizationStatus(status);
 }
 
+/**
+ * Wallet-app-initiated provisioning extension cache (P0-2 §4.7) — iOS only.
+ *
+ * The host app calls these to keep the App Group container fresh so the
+ * PKIssuerProvisioningExtension can answer Apple's eligibility queries without
+ * the app running. See `EligibilityCard` for the two-identifier rule.
+ */
+async function setWalletExtensionEligibleCards(cards: EligibilityCard[]): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('setWalletExtensionEligibleCards is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    // Native owns the on-disk schema (incl. writtenAt) via Codable; we only
+    // hand over the cards array as JSON.
+    await Wallet.setWalletExtensionEligibleCards(JSON.stringify(cards));
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
+async function clearWalletExtensionEligibleCards(): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('clearWalletExtensionEligibleCards is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    await Wallet.clearWalletExtensionEligibleCards();
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
+/**
+ * Persists the Clerk session token and its absolute expiry (ms since epoch) to
+ * the shared keychain. The extension uses the expiry to judge token validity
+ * locally within its sub-100ms status budget.
+ */
+async function setWalletExtensionAuthToken(token: string, expiresAtMs: number): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('setWalletExtensionAuthToken is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    await Wallet.setWalletExtensionAuthToken(token, expiresAtMs);
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
+async function clearWalletExtensionAuthToken(): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('clearWalletExtensionAuthToken is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    await Wallet.clearWalletExtensionAuthToken();
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
+/**
+ * Persists a card-art PNG thumbnail at the given screen scale (1, 2, or 3).
+ * `pngBase64` is the raw base64 of the PNG bytes (no data: URI prefix).
+ */
+async function setWalletExtensionCardArt(cardId: string, scale: 1 | 2 | 3, pngBase64: string): Promise<void> {
+  if (Platform.OS === 'android') {
+    throw new Error('setWalletExtensionCardArt is not available on Android');
+  }
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+  try {
+    await Wallet.setWalletExtensionCardArt(cardId, scale, pngBase64);
+  } catch (err) {
+    throw toWalletError(err);
+  }
+}
+
 export type {
   AndroidCardData,
   AndroidWalletData,
@@ -240,6 +408,7 @@ export type {
   onCardRemovedPayload,
   TokenizationStatus,
   TokenInfo,
+  EligibilityCard,
 };
 export {
   AddToWalletButton,
@@ -247,10 +416,18 @@ export {
   getSecureWalletInfo,
   getCardStatusBySuffix,
   getCardStatusByIdentifier,
+  canAddCardWithIdentifier,
+  isWatchPaired,
+  debugPassLibraryState,
   addCardToGoogleWallet,
   resumeAddCardToGoogleWallet,
   listTokens,
   addCardToAppleWallet,
+  setWalletExtensionEligibleCards,
+  clearWalletExtensionEligibleCards,
+  setWalletExtensionAuthToken,
+  clearWalletExtensionAuthToken,
+  setWalletExtensionCardArt,
   addListener,
   removeListener,
   WalletError,

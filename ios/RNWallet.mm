@@ -44,6 +44,7 @@ RCT_REMAP_METHOD(IOSPresentAddPaymentPassView,
       @"cardHolderName": [self safeString:cardData.cardHolderName()],
       @"lastDigits": [self safeString:cardData.lastDigits()],
       @"cardDescription": [self safeString:cardData.cardDescription()],
+      @"primaryAccountIdentifier": [self safeString:cardData.primaryAccountIdentifier()],
     };
     dispatch_async(dispatch_get_main_queue(), ^{
       [self->walletManager IOSPresentAddPaymentPassViewWithCardData:cardDataDict completion:^(OperationResult result, NSDictionary* data) {
@@ -93,6 +94,28 @@ RCT_REMAP_METHOD(getCardStatusByIdentifier,
   resolve([walletManager getCardStatusByIdentifierWithIdentifier:identifier]);
 }
 
+RCT_REMAP_METHOD(canAddCardWithIdentifier,
+                 canAddCardWithIdentifier:(NSString *)identifier
+                 resolve:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  resolve([walletManager canAddCardWithIdentifierWithIdentifier:identifier]);
+}
+
+RCT_REMAP_METHOD(isWatchPaired,
+                 isWatchPaired:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  resolve([walletManager isWatchPaired]);
+}
+
+RCT_REMAP_METHOD(debugPassLibraryState,
+                 debugPassLibraryState:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  resolve([walletManager debugPassLibraryState]);
+}
+
 - (void)addCardToGoogleWallet:(JS::NativeWallet::AndroidCardData &)cardData resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   // no-op (Android only)
 }
@@ -112,6 +135,66 @@ RCT_REMAP_METHOD(getCardStatusByIdentifier,
 
 - (void)listTokens:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   resolve([walletManager listPasses]);
+}
+
+#pragma mark - Wallet Extension cache (P0-2 §4.7)
+
+RCT_REMAP_METHOD(setWalletExtensionEligibleCards,
+                 setWalletExtensionEligibleCards:(NSString *)cardsJson
+                 resolve:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  NSString *error = [walletManager setWalletExtensionEligibleCardsWithCardsJson:cardsJson];
+  if (error) {
+    [self rejectWithErrorType:@"set_eligible_cards_failed" code:1002 description:error rejecter:reject];
+  } else {
+    resolve(nil);
+  }
+}
+
+RCT_REMAP_METHOD(clearWalletExtensionEligibleCards,
+                 clearWalletExtensionEligibleCards:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  [walletManager clearWalletExtensionEligibleCards];
+  resolve(nil);
+}
+
+RCT_REMAP_METHOD(setWalletExtensionAuthToken,
+                 setWalletExtensionAuthToken:(NSString *)token
+                 expiresAtMs:(double)expiresAtMs
+                 resolve:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  NSString *error = [walletManager setWalletExtensionAuthTokenWithToken:token expiresAtMs:expiresAtMs];
+  if (error) {
+    [self rejectWithErrorType:@"set_auth_token_failed" code:1003 description:error rejecter:reject];
+  } else {
+    resolve(nil);
+  }
+}
+
+RCT_REMAP_METHOD(clearWalletExtensionAuthToken,
+                 clearWalletExtensionAuthToken:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  [walletManager clearWalletExtensionAuthToken];
+  resolve(nil);
+}
+
+RCT_REMAP_METHOD(setWalletExtensionCardArt,
+                 setWalletExtensionCardArt:(NSString *)cardId
+                 scale:(double)scale
+                 pngBase64:(NSString *)pngBase64
+                 resolve:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  NSString *error = [walletManager setWalletExtensionCardArtWithCardId:cardId scale:(NSInteger)scale pngBase64:pngBase64];
+  if (error) {
+    [self rejectWithErrorType:@"set_card_art_failed" code:1004 description:error rejecter:reject];
+  } else {
+    resolve(nil);
+  }
 }
 
 - (NSArray<NSString *> *)supportedEvents {

@@ -23,7 +23,11 @@
       [
         "@expensify/react-native-wallet",
         {
-          "googleTapAndPaySdkPath": "./libs/tapandpay-v18.7.0.zip"
+          "googleTapAndPaySdkPath": "./libs/tapandpay-v18.7.0.zip",
+          "walletExtension": {
+            "appGroup": "group.com.expensify.walletexampleexpo",
+            "encryptBaseUrl": "https://api.darbpay.com/api/employee"
+          }
         }
       ]
     ]

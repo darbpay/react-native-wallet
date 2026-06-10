@@ -176,11 +176,12 @@ The library offers seven functions for seamless integration and use of the Apple
 |----------|-------------|------------|----------------|:---:|:-------:|
 | **getSecureWalletInfo** | Returns necessary platform-specific wallet information for secure transactions. | None | `WalletData` | ❌ | ✅ |
 | **checkWalletAvailability** | Checks if the wallet is ready and initializes it if possible. | None | `boolean` | ✅ | ✅ |
-| **getCardStatusBySuffix** | Retrieves the current status of a card in the wallet. | `lastDigits: string`<br>(The last few digits of the card number) | `CardStatus` | ✅ | ✅ |
-| **getCardStatusByIdentifier** | Returns the state of a card based on a platform-specific identifier. On Android, it's `Token Reference ID` and on iOS, it's `Primary Account Identifier`. | `identifier: string`,<br>`tsp: string` | `CardStatus` | ✅ | ✅ |
+| **getCardStatusBySuffix** | Retrieves the current status of a card in the wallet. On iOS this scans both iPhone passes and paired Apple Watch passes (`PKPassLibrary.remoteSecureElementPasses`). | `lastDigits: string`<br>(The last few digits of the card number) | `CardStatus` | ✅ | ✅ |
+| **getCardStatusByIdentifier** | Returns the state of a card based on a platform-specific identifier. On Android, it's `Token Reference ID` and on iOS, it's `Primary Account Identifier`. On iOS this scans both iPhone and paired Apple Watch passes. | `identifier: string`,<br>`tsp: string` | `CardStatus` | ✅ | ✅ |
+| **canAddCardWithIdentifier** | iOS only. Wraps `PKPassLibrary.canAddSecureElementPass(primaryAccountIdentifier:)` — the canonical signal per Apple §7.5 for whether the Add to Apple Wallet button should be shown. Returns `true` only when the card is not yet provisioned to this iPhone or any paired Apple Watch. Resolves `false` on Android. | `identifier: string`<br>(Apple `primaryAccountIdentifier` / FPANID) | `boolean` | ✅ | ❌ |
 | **addCardToGoogleWallet** | Initiates native Push Provisioning flow for adding a card to the Google Wallet. | `data`: `AndroidCardData` | `TokenizationStatus` | ❌ | ✅ |
 | **resumeAddCardToGoogleWallet** | Resumes the Push Provisioning flow for adding a card to the Google Wallet using existing token reference ID. | `data`: `AndroidResumeCardData` | `TokenizationStatus` | ❌ | ✅ |
-| **listTokens** | Lists all tokens currently stored in the Google Wallet. | None | `TokenInfo[]` | ❌ | ✅ |
+| **listTokens** | Lists all tokens currently stored in the Wallet. On iOS, returns iPhone passes plus paired Apple Watch passes (each entry has `isRemote: boolean`). | None | `TokenInfo[]` | ✅ | ✅ |
 | **addCardToAppleWallet** | Initiates native Push Provisioning flow for adding a card to the Apple Wallet. | `data`: `IOSCardData`,<br>`issuerEncrypt-`<br>`PayloadCallback: IOSIssuerCallback` | `void` | ✅ | ❌ |
 
 

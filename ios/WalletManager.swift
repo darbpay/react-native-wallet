@@ -2,6 +2,7 @@ import Foundation
 import PassKit
 import UIKit
 import React
+import WatchConnectivity
 
 public typealias CompletionHandler = (OperationResult, NSDictionary?) -> Void
 
@@ -49,6 +50,10 @@ open class WalletManager: UIViewController {
       name: NSNotification.Name(rawValue: PKPassLibraryNotificationName.PKPassLibraryDidChange.rawValue),
       object: nil
     )
+
+    // Kick off WCSession activation early so `isWatchPaired()` returns a valid
+    // value by the time JS queries it (activation is async).
+    WatchPairingObserver.shared.activateIfPossible()
   }
 
   @objc func passLibraryDidChange(_ notification: Notification) {
@@ -147,6 +152,14 @@ open class WalletManager: UIViewController {
     configuration.primaryAccountSuffix = card.lastDigits
     configuration.localizedDescription = String(card.cardDescription)
 
+    // Apple §7.6: passing the FPANID makes Apple Wallet present only the
+    // devices the card can still be added to (e.g. a paired Apple Watch when
+    // the card is already on the iPhone). Omit it on a card's first add so the
+    // standard device picker / net-new flow runs.
+    if let identifier = card.primaryAccountIdentifier, !identifier.isEmpty {
+      configuration.primaryAccountIdentifier = identifier
+    }
+
     guard let enrollViewController = PKAddPaymentPassViewController(requestConfiguration: configuration, delegate: self) else {
       completion(.error, [
         "errorMessage": "InApp enrollment controller configuration fails"
@@ -196,22 +209,33 @@ open class WalletManager: UIViewController {
     self.addPassHandler = nil
   }
   
+  // Yields every payment-capable pass the issuer is entitled to read — iPhone
+  // local passes (via `passes()` per Apple §7.3, iOS 13.4+) and paired Apple
+  // Watch passes (via `remoteSecureElementPasses`). Watch passes are flagged so
+  // callers can distinguish iPhone vs Watch when they need to.
+  private func allSecureElementPasses() -> [(pass: PKSecureElementPass, isRemote: Bool)] {
+    let localPasses = passLibrary.passes().compactMap { pass -> PKSecureElementPass? in
+      return pass.secureElementPass
+    }
+    let remotePasses = passLibrary.remoteSecureElementPasses
+    return localPasses.map { ($0, false) } + remotePasses.map { ($0, true) }
+  }
+
   private func getPassActivationState(matching condition: (PKSecureElementPass) -> Bool) -> NSNumber {
-    let paymentPasses = passLibrary.passes(of: .payment)
-    if paymentPasses.isEmpty {
+    let passes = allSecureElementPasses()
+    if passes.isEmpty {
       self.logInfo(message: "No passes found in Wallet.")
       return -1
     }
 
-    for pass in paymentPasses {
-      guard let securePassElement = pass.secureElementPass else { continue }
-      if condition(securePassElement) {
-        return NSNumber(value: securePassElement.passActivationState.rawValue)
+    for entry in passes {
+      if condition(entry.pass) {
+        return NSNumber(value: entry.pass.passActivationState.rawValue)
       }
     }
     return -1
   }
-  
+
   @objc public func getCardStatusBySuffix(last4Digits: NSString) -> NSNumber {
     return getPassActivationState { pass in
       return pass.primaryAccountNumberSuffix.hasSuffix(last4Digits as String)
@@ -224,22 +248,63 @@ open class WalletManager: UIViewController {
     }
   }
 
-  @objc public func listPasses() -> NSArray {
-    let allPasses = passLibrary.passes()
-    self.logInfo(message: "DEBUG all passes count: \(allPasses.count)")
-    for pass in allPasses {
-      self.logInfo(message: "DEBUG pass type=\(pass.passType.rawValue) passTypeIdentifier=\(pass.passTypeIdentifier) serialNumber=\(pass.serialNumber)")
-    }
+  // Wraps Apple §7.5 canonical signal `PKPassLibrary.canAddSecureElementPass`.
+  // Returns true only when the card is not yet provisioned to this iPhone or
+  // any paired Apple Watch — the right check for whether to show the Add
+  // to Apple Wallet button.
+  @objc public func canAddCardWithIdentifier(identifier: NSString) -> NSNumber {
+    let canAdd = passLibrary.canAddSecureElementPass(primaryAccountIdentifier: identifier as String)
+    return NSNumber(value: canAdd)
+  }
 
+  // Whether this iPhone is paired with an Apple Watch (`WCSession.isPaired`).
+  // Used to decide whether to surface an "Add to Apple Watch" label. This is a
+  // more reliable paired-Watch signal than `remoteSecureElementPasses`, which
+  // is empty when the Watch is paired but holds no passes yet. Returns false
+  // until the WCSession has activated (graceful — caller falls back to the
+  // generic add label, which still provisions to the Watch correctly).
+  @objc public func isWatchPaired() -> NSNumber {
+    return NSNumber(value: WatchPairingObserver.shared.isWatchPaired)
+  }
+
+  // Diagnostic: snapshot of every counter PassKit exposes about pass visibility,
+  // so callers can distinguish between "no entitlement / not allow-listed"
+  // (counts all zero, canAddPaymentPass possibly false) and "entitlement OK but
+  // PNO bundle-id mismatch" (allPasses > 0, paymentPasses == 0). Verbose by
+  // design — meant for one-off debugging, not steady-state polling.
+  @objc public func debugPassLibraryState() -> NSDictionary {
+    let allPasses = passLibrary.passes()
     let paymentPasses = passLibrary.passes(of: .payment)
-    self.logInfo(message: "DEBUG payment passes count: \(paymentPasses.count)")
+    let remotePasses = passLibrary.remoteSecureElementPasses
+    return [
+      "canAddPaymentPass": PKAddPaymentPassViewController.canAddPaymentPass(),
+      "allPassesCount": allPasses.count,
+      "paymentPassesCount": paymentPasses.count,
+      "remoteSecureElementPassesCount": remotePasses.count,
+      "allPassTypeIdentifiers": allPasses.map { $0.passTypeIdentifier },
+    ]
+  }
+
+  // PassKit sometimes returns `primaryAccountNumberSuffix` with a leading
+  // "x"/"X" (e.g. "x1234" instead of "1234"). The activation-state lookup uses
+  // `hasSuffix`, which absorbs the prefix, but `listPasses` exposes the raw
+  // value to JS — strip it here so consumers can safely `===`-compare.
+  private static func normalizedSuffix(_ raw: String?) -> String {
+    guard let raw else { return "" }
+    if raw.first == "x" || raw.first == "X" { return String(raw.dropFirst()) }
+    return raw
+  }
+
+  @objc public func listPasses() -> NSArray {
+    let passes = allSecureElementPasses()
+    self.logInfo(message: "DEBUG secure element passes count: \(passes.count) (local + remote)")
     var results: [NSDictionary] = []
-    for pass in paymentPasses {
-      guard let secure = pass.secureElementPass else { continue }
+    for entry in passes {
       results.append([
-        "identifier": secure.primaryAccountIdentifier ?? "",
-        "lastDigits": secure.primaryAccountNumberSuffix ?? "",
-        "tokenState": secure.passActivationState.rawValue,
+        "identifier": entry.pass.primaryAccountIdentifier ?? "",
+        "lastDigits": Self.normalizedSuffix(entry.pass.primaryAccountNumberSuffix),
+        "tokenState": entry.pass.passActivationState.rawValue,
+        "isRemote": entry.isRemote,
       ])
     }
 
@@ -295,7 +360,7 @@ extension WalletManager: PKAddPaymentPassViewControllerDelegate {
         presentAddPaymentPassCompletionHandler = nil
       }
     }
-    
+
   // This method will be called when enroll process ends (with success/error)
   public func addPaymentPassViewController(
     _ controller: PKAddPaymentPassViewController,
@@ -384,6 +449,61 @@ extension WalletManager: PKAddPaymentPassViewControllerDelegate {
   }
 }
 
+// MARK: - Wallet Extension cache (P0-2 §4.7)
+//
+// These setters let JS keep the App Group container fresh for the
+// PKIssuerProvisioningExtension. They delegate to the shared layer
+// (`EligibilityCache` / `SharedKeychain`). When the App Group is unconfigured
+// (consumer hasn't enabled the Expo plugin), `SharedAppGroup.identifier` is nil
+// and the shared helpers no-op, so these stay backward compatible.
+//
+// Each returns an error message String (nil on success) so the Obj-C bridge can
+// resolve/reject without an NSError out-parameter.
+extension WalletManager {
+  @objc public func setWalletExtensionEligibleCards(cardsJson: NSString) -> NSString? {
+    guard let data = (cardsJson as String).data(using: .utf8) else {
+      return "invalid_cards_json_encoding"
+    }
+    do {
+      let cards = try JSONDecoder().decode([EligibilityCard].self, from: data)
+      try EligibilityCache.write(cards)
+      return nil
+    } catch {
+      return "eligible_cards_write_failed: \(error.localizedDescription)" as NSString
+    }
+  }
+
+  @objc public func clearWalletExtensionEligibleCards() {
+    EligibilityCache.clear()
+  }
+
+  @objc public func setWalletExtensionAuthToken(token: NSString, expiresAtMs: Double) -> NSString? {
+    let expiresAt = Date(timeIntervalSince1970: expiresAtMs / 1000.0)
+    do {
+      try SharedKeychain.setAuthToken(token as String, expiresAt: expiresAt)
+      return nil
+    } catch {
+      return "auth_token_write_failed: \(error.localizedDescription)" as NSString
+    }
+  }
+
+  @objc public func clearWalletExtensionAuthToken() {
+    SharedKeychain.clearAuthToken()
+  }
+
+  @objc public func setWalletExtensionCardArt(cardId: NSString, scale: Int, pngBase64: NSString) -> NSString? {
+    guard let pngData = Data(base64Encoded: pngBase64 as String) else {
+      return "invalid_card_art_base64"
+    }
+    do {
+      try EligibilityCache.writeCardArt(cardId: cardId as String, scale: scale, pngData: pngData)
+      return nil
+    } catch {
+      return "card_art_write_failed: \(error.localizedDescription)" as NSString
+    }
+  }
+}
+
 extension WalletManager {
   enum Event: String, CaseIterable {
     case onCardActivated
@@ -393,5 +513,43 @@ extension WalletManager {
   @objc
   public static var supportedEvents: [String] {
     return Event.allCases.map(\.rawValue);
+  }
+}
+
+// Tracks whether the iPhone is paired with an Apple Watch via WatchConnectivity.
+// A singleton because `WCSession.default` is process-wide and must keep its
+// delegate alive; reading `isPaired` only after activation avoids the
+// pre-activation undefined value.
+final class WatchPairingObserver: NSObject, WCSessionDelegate {
+  @objc static let shared = WatchPairingObserver()
+
+  private override init() {
+    super.init()
+  }
+
+  func activateIfPossible() {
+    guard WCSession.isSupported() else { return }
+    let session = WCSession.default
+    if session.delegate == nil {
+      session.delegate = self
+    }
+    if session.activationState != .activated {
+      session.activate()
+    }
+  }
+
+  var isWatchPaired: Bool {
+    guard WCSession.isSupported() else { return false }
+    let session = WCSession.default
+    guard session.activationState == .activated else { return false }
+    return session.isPaired
+  }
+
+  // MARK: - WCSessionDelegate (all required on iOS)
+  func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {}
+  func sessionDidBecomeInactive(_ session: WCSession) {}
+  func sessionDidDeactivate(_ session: WCSession) {
+    // Re-activate after a Watch switch so pairing info stays current.
+    WCSession.default.activate()
   }
 }
