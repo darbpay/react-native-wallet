@@ -44,6 +44,7 @@ RCT_REMAP_METHOD(IOSPresentAddPaymentPassView,
       @"cardHolderName": [self safeString:cardData.cardHolderName()],
       @"lastDigits": [self safeString:cardData.lastDigits()],
       @"cardDescription": [self safeString:cardData.cardDescription()],
+      @"primaryAccountIdentifier": [self safeString:cardData.primaryAccountIdentifier()],
     };
     dispatch_async(dispatch_get_main_queue(), ^{
       [self->walletManager IOSPresentAddPaymentPassViewWithCardData:cardDataDict completion:^(OperationResult result, NSDictionary* data) {
@@ -99,6 +100,13 @@ RCT_REMAP_METHOD(canAddCardWithIdentifier,
                  reject:(RCTPromiseRejectBlock)reject)
 {
   resolve([walletManager canAddCardWithIdentifierWithIdentifier:identifier]);
+}
+
+RCT_REMAP_METHOD(isWatchPaired,
+                 isWatchPaired:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject)
+{
+  resolve([walletManager isWatchPaired]);
 }
 
 RCT_REMAP_METHOD(debugPassLibraryState,

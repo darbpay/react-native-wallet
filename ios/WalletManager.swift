@@ -2,6 +2,7 @@ import Foundation
 import PassKit
 import UIKit
 import React
+import WatchConnectivity
 
 public typealias CompletionHandler = (OperationResult, NSDictionary?) -> Void
 
@@ -49,6 +50,10 @@ open class WalletManager: UIViewController {
       name: NSNotification.Name(rawValue: PKPassLibraryNotificationName.PKPassLibraryDidChange.rawValue),
       object: nil
     )
+
+    // Kick off WCSession activation early so `isWatchPaired()` returns a valid
+    // value by the time JS queries it (activation is async).
+    WatchPairingObserver.shared.activateIfPossible()
   }
 
   @objc func passLibraryDidChange(_ notification: Notification) {
@@ -147,6 +152,14 @@ open class WalletManager: UIViewController {
     configuration.primaryAccountSuffix = card.lastDigits
     configuration.localizedDescription = String(card.cardDescription)
 
+    // Apple §7.6: passing the FPANID makes Apple Wallet present only the
+    // devices the card can still be added to (e.g. a paired Apple Watch when
+    // the card is already on the iPhone). Omit it on a card's first add so the
+    // standard device picker / net-new flow runs.
+    if let identifier = card.primaryAccountIdentifier, !identifier.isEmpty {
+      configuration.primaryAccountIdentifier = identifier
+    }
+
     guard let enrollViewController = PKAddPaymentPassViewController(requestConfiguration: configuration, delegate: self) else {
       completion(.error, [
         "errorMessage": "InApp enrollment controller configuration fails"
@@ -244,6 +257,16 @@ open class WalletManager: UIViewController {
     return NSNumber(value: canAdd)
   }
 
+  // Whether this iPhone is paired with an Apple Watch (`WCSession.isPaired`).
+  // Used to decide whether to surface an "Add to Apple Watch" label. This is a
+  // more reliable paired-Watch signal than `remoteSecureElementPasses`, which
+  // is empty when the Watch is paired but holds no passes yet. Returns false
+  // until the WCSession has activated (graceful — caller falls back to the
+  // generic add label, which still provisions to the Watch correctly).
+  @objc public func isWatchPaired() -> NSNumber {
+    return NSNumber(value: WatchPairingObserver.shared.isWatchPaired)
+  }
+
   // Diagnostic: snapshot of every counter PassKit exposes about pass visibility,
   // so callers can distinguish between "no entitlement / not allow-listed"
   // (counts all zero, canAddPaymentPass possibly false) and "entitlement OK but
@@ -337,7 +360,7 @@ extension WalletManager: PKAddPaymentPassViewControllerDelegate {
         presentAddPaymentPassCompletionHandler = nil
       }
     }
-    
+
   // This method will be called when enroll process ends (with success/error)
   public func addPaymentPassViewController(
     _ controller: PKAddPaymentPassViewController,
@@ -490,5 +513,43 @@ extension WalletManager {
   @objc
   public static var supportedEvents: [String] {
     return Event.allCases.map(\.rawValue);
+  }
+}
+
+// Tracks whether the iPhone is paired with an Apple Watch via WatchConnectivity.
+// A singleton because `WCSession.default` is process-wide and must keep its
+// delegate alive; reading `isPaired` only after activation avoids the
+// pre-activation undefined value.
+final class WatchPairingObserver: NSObject, WCSessionDelegate {
+  @objc static let shared = WatchPairingObserver()
+
+  private override init() {
+    super.init()
+  }
+
+  func activateIfPossible() {
+    guard WCSession.isSupported() else { return }
+    let session = WCSession.default
+    if session.delegate == nil {
+      session.delegate = self
+    }
+    if session.activationState != .activated {
+      session.activate()
+    }
+  }
+
+  var isWatchPaired: Bool {
+    guard WCSession.isSupported() else { return false }
+    let session = WCSession.default
+    guard session.activationState == .activated else { return false }
+    return session.isPaired
+  }
+
+  // MARK: - WCSessionDelegate (all required on iOS)
+  func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {}
+  func sessionDidBecomeInactive(_ session: WCSession) {}
+  func sessionDidDeactivate(_ session: WCSession) {
+    // Re-activate after a Watch switch so pairing info stays current.
+    WCSession.default.activate()
   }
 }

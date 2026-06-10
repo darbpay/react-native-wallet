@@ -41,6 +41,11 @@ type IOSCardData = {
   cardHolderName: string;
   lastDigits: string;
   cardDescription: string;
+  // Apple FPANID (`primaryAccountIdentifier`), from the PNO after a card's
+  // first provisioning. When set, Apple Wallet scopes the provisioning UI to
+  // the devices that can still receive the pass — e.g. "Add to Apple Watch"
+  // for a card already on the iPhone (Apple §7.6). Omit on the first add.
+  primaryAccountIdentifier?: string;
 };
 
 type onCardActivatedPayload = {
@@ -107,6 +112,10 @@ export interface Spec extends TurboModule {
   getCardStatusBySuffix(last4Digits: string): Promise<number>;
   getCardStatusByIdentifier(identifier: string, tsp: string): Promise<number>;
   canAddCardWithIdentifier(identifier: string): Promise<boolean>;
+  // iOS only. true when this iPhone is paired with an Apple Watch (via
+  // `WCSession.isPaired`). Used to decide whether to surface "Add to Apple
+  // Watch". Resolves false on Android / when WatchConnectivity is unsupported.
+  isWatchPaired(): Promise<boolean>;
   debugPassLibraryState(): Promise<{
     canAddPaymentPass: boolean;
     allPassesCount: number;

@@ -169,6 +169,25 @@ async function canAddCardWithIdentifier(identifier: string): Promise<boolean> {
 }
 
 /**
+ * iOS only. Resolves `true` when this iPhone is paired with an Apple Watch
+ * (`WCSession.isPaired`). Use it to decide whether to surface an "Add to Apple
+ * Watch" label for a card already on the iPhone. More reliable than inspecting
+ * `listTokens()` for remote passes, which is empty when the Watch is paired but
+ * holds no passes yet. Resolves `false` on Android.
+ */
+async function isWatchPaired(): Promise<boolean> {
+  if (Platform.OS === 'android') {
+    return false;
+  }
+
+  if (!Wallet) {
+    return getModuleLinkingRejection();
+  }
+
+  return Wallet.isWatchPaired();
+}
+
+/**
  * iOS-only diagnostic. Snapshots every counter PassKit exposes about pass
  * visibility so callers can distinguish between:
  *   - no entitlement / not on Apple's allow list — `allPassesCount === 0`
@@ -398,6 +417,7 @@ export {
   getCardStatusBySuffix,
   getCardStatusByIdentifier,
   canAddCardWithIdentifier,
+  isWatchPaired,
   debugPassLibraryState,
   addCardToGoogleWallet,
   resumeAddCardToGoogleWallet,
