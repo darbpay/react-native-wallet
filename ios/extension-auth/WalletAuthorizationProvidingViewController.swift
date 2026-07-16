@@ -690,6 +690,8 @@ fileprivate struct Country {
 fileprivate let LOGIN_COUNTRIES: [Country] = [
   Country(code: "+966", flag: "🇸🇦", digits: 9, placeholder: "5X XXX XXXX"),
   Country(code: "+1", flag: "🇺🇸", digits: 10, placeholder: "XXX XXX XXXX"),
+  Country(code: "+31", flag: "🇳🇱", digits: 9, placeholder: "6 XXXX XXXX"),
+  Country(code: "+33", flag: "🇫🇷", digits: 9, placeholder: "X XX XX XX XX"),
 ]
 
 /// Port of `formatters.ts → formatPhoneByCountry`. Inserts spaces so the
