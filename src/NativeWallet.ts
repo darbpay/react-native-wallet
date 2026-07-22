@@ -103,6 +103,12 @@ type EligibilityCard = {
   cardholderName: string;
   network: string;
   eligibleAt: string;
+  // Host-app-computed provisioning state per surface (from listTokens() at
+  // sync time). The extension's own PKPassLibrary reads return empty until
+  // Apple backend-enables payment-pass-provisioning for the extension App ID,
+  // so the app ships the already-added verdicts in the cache.
+  onIphone?: boolean;
+  onWatch?: boolean;
 };
 
 export interface Spec extends TurboModule {

@@ -20,6 +20,14 @@ struct EligibilityCard: Codable {
   let cardholderName: String
   let network: String
   let eligibleAt: String
+  /// Host-app-computed provisioning state (from `listTokens()` at sync time).
+  /// The extension's own PKPassLibrary reads return empty until Apple enables
+  /// the payment-pass-provisioning capability for the extension App ID
+  /// (backend activation, see FB/DTS forums thread 815110), so the app —
+  /// which CAN read the library — ships the answer in the cache. Optional so
+  /// caches written by older app versions still decode.
+  let onIphone: Bool?
+  let onWatch: Bool?
 }
 
 /// On-disk shape of `wallet-eligible.json`.
