@@ -34,7 +34,9 @@ import PassKit
     result.remotePassEntriesAvailable = false
     result.requiresAuthentication = false
 
-    os_log("status() entered", log: Self.log, type: .default)
+    // Build marker: proves which handler generation is actually installed —
+    // if Console.app doesn't show "gen2", the extension target wasn't rebuilt.
+    os_log("status() entered (gen2 live-library dedup)", log: Self.log, type: .default)
 
     // No cache yet (user has never logged into the host app, or cache went
     // stale past the 30-day budget). Wallet falls back to the "Open <App> to
@@ -56,11 +58,18 @@ import PassKit
     // here on token expiry hides the issuer entirely (PROPBM19 outcome-2
     // fallback) — which used to be acceptable when we only shipped the non-UI
     // extension, but now defeats the purpose of bundling the UI extension.
+    //
+    // Eligibility is decided against the LIVE pass library (panId, with a
+    // last4-suffix fallback for cards whose panId hasn't reached the cache) —
+    // never against a write-time snapshot. When every cached card is already
+    // provisioned on both surfaces, both flags come back false and Wallet
+    // removes the issuer row entirely (Apple: "all cards are already
+    // provisioned" → hidden).
     let library = PKPassLibrary()
-    let localProvisioned = provisionedIdentifiers(library, remote: false)
-    let remoteProvisioned = provisionedIdentifiers(library, remote: true)
-    result.passEntriesAvailable = file.cards.contains { isEligible($0, excluding: localProvisioned) }
-    result.remotePassEntriesAvailable = file.cards.contains { isEligible($0, excluding: remoteProvisioned) }
+    let localEligible = eligibleCards(file.cards, in: library, remote: false)
+    let remoteEligible = eligibleCards(file.cards, in: library, remote: true)
+    result.passEntriesAvailable = !localEligible.isEmpty
+    result.remotePassEntriesAvailable = !remoteEligible.isEmpty
 
     // Token expired or missing → UI extension must re-auth before
     // generateAddPaymentPassRequest can call the encrypt endpoint with a
@@ -120,34 +129,79 @@ import PassKit
 
   // MARK: - Helpers
 
-  /// Dedup uses `panId` (Apple's primaryAccountIdentifier); the entry
-  /// identifier is `cardId`. A card with no `panId` has never been provisioned
-  /// and is therefore always eligible.
-  private func isEligible(_ card: EligibilityCard, excluding provisioned: Set<String>) -> Bool {
-    guard let panId = card.panId else { return true }
-    return !provisioned.contains(panId)
-  }
-
-  private func provisionedIdentifiers(_ library: PKPassLibrary, remote: Bool) -> Set<String> {
+  /// The cached cards still eligible for the given surface, decided against
+  /// the live pass library at call time. Dedup is `panId` first (exact), then
+  /// a collision-guarded `last4`-suffix fallback for cards whose `panId`
+  /// hasn't reached the cache yet — the decision itself lives in
+  /// `ProvisioningEligibility` so it stays unit-testable without PassKit.
+  private func eligibleCards(_ cards: [EligibilityCard], in library: PKPassLibrary, remote: Bool) -> [EligibilityCard] {
+    let passes: [PKSecureElementPass]
     if remote {
-      return Set(library.remoteSecureElementPasses.compactMap { $0.primaryAccountIdentifier })
+      passes = library.remoteSecureElementPasses
+    } else {
+      passes = library.passes(of: .payment).compactMap { $0.secureElementPass }
     }
-    return Set(library.passes(of: .payment).compactMap { $0.secureElementPass?.primaryAccountIdentifier })
+    let panIds = Set(passes.compactMap { $0.primaryAccountIdentifier })
+    let suffixes = Set(passes.map { ProvisioningEligibility.normalizedSuffix($0.primaryAccountNumberSuffix) })
+
+    let keys = cards.map { card in
+      ProvisioningEligibility.CardKey(
+        panId: card.panId,
+        last4: card.last4,
+        // Per-surface verdict shipped by the host app (its pass-library read
+        // works; ours returns empty until Apple backend-enables the App ID).
+        alreadyProvisioned: (remote ? card.onWatch : card.onIphone) ?? false
+      )
+    }
+    let indices = ProvisioningEligibility.eligibleIndices(
+      cards: keys,
+      provisionedPanIds: panIds,
+      provisionedSuffixes: suffixes
+    )
+
+    // Debug detail: what the live library exposed and how each cached card was
+    // judged. panIds are truncated to their last 6 chars — enough to correlate
+    // with the app-side sync logs without dumping full FPANIDs.
+    let panIdsDesc = panIds.map { String($0.suffix(6)) }.sorted().joined(separator: ",")
+    let suffixesDesc = suffixes.sorted().joined(separator: ",")
+    // mode=live → decisions come from the pass library; mode=flags → library
+    // empty (no access or empty wallet), decisions fall back to the host
+    // app's onIphone/onWatch verdicts.
+    let mode = passes.isEmpty ? "flags" : "live"
+    os_log(
+      "eligibility(remote=%{public}d): mode=%{public}@ %{public}d passes in library — suffixes=[%{public}@] panIds…=[%{public}@]",
+      log: Self.log, type: .default, remote ? 1 : 0, mode, passes.count, suffixesDesc, panIdsDesc
+    )
+    let eligibleSet = Set(indices)
+    for (index, key) in keys.enumerated() {
+      os_log(
+        "eligibility(remote=%{public}d): card[%{public}d] last4=%{public}@ panId…=%{public}@ → %{public}@",
+        log: Self.log, type: .default, remote ? 1 : 0, index, key.last4,
+        key.panId.map { String($0.suffix(6)) } ?? "nil",
+        eligibleSet.contains(index) ? "ELIGIBLE" : "excluded"
+      )
+    }
+    return indices.map { cards[$0] }
   }
 
   private func buildEntries(remote: Bool) -> [PKIssuerProvisioningExtensionPaymentPassEntry] {
-    guard let file = EligibilityCache.read(),
-          EligibilityCache.isFresh(file),
-          SharedKeychain.isTokenValid() else {
+    guard let file = EligibilityCache.read() else {
+      os_log("entries(remote=%{public}d) → [] (no cache)", log: Self.log, type: .default, remote ? 1 : 0)
+      return []
+    }
+    guard EligibilityCache.isFresh(file) else {
+      os_log("entries(remote=%{public}d) → [] (stale cache)", log: Self.log, type: .default, remote ? 1 : 0)
+      return []
+    }
+    guard SharedKeychain.isTokenValid() else {
+      os_log("entries(remote=%{public}d) → [] (invalid token)", log: Self.log, type: .default, remote ? 1 : 0)
       return []
     }
 
     let library = PKPassLibrary()
-    let exclude = provisionedIdentifiers(library, remote: remote)
 
-    return file.cards.compactMap { card -> PKIssuerProvisioningExtensionPaymentPassEntry? in
-      guard isEligible(card, excluding: exclude),
-            let configuration = PKAddPaymentPassRequestConfiguration(encryptionScheme: .ECC_V2) else {
+    return eligibleCards(file.cards, in: library, remote: remote).compactMap { card -> PKIssuerProvisioningExtensionPaymentPassEntry? in
+      guard let configuration = PKAddPaymentPassRequestConfiguration(encryptionScheme: .ECC_V2) else {
         return nil
       }
       configuration.cardholderName = card.cardholderName
