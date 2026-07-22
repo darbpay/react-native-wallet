@@ -139,7 +139,12 @@ import PassKit
     if remote {
       passes = library.remoteSecureElementPasses
     } else {
-      passes = library.passes(of: .payment).compactMap { $0.secureElementPass }
+      // passes() + secureElementPass — the exact call the host app's
+      // WalletManager uses and is proven to return payment passes. The
+      // deprecated passes(of: .payment) filter returned [] in the appex
+      // context even with entitlements in place, which silently forced
+      // flags mode (see the mode= log in eligibility below).
+      passes = library.passes().compactMap { $0.secureElementPass }
     }
     let panIds = Set(passes.compactMap { $0.primaryAccountIdentifier })
     let suffixes = Set(passes.map { ProvisioningEligibility.normalizedSuffix($0.primaryAccountNumberSuffix) })
