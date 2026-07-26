@@ -36,7 +36,7 @@ import PassKit
 
     // Build marker: proves which handler generation is actually installed —
     // if Console.app doesn't show "gen2", the extension target wasn't rebuilt.
-    os_log("status() entered (gen2 live-library dedup)", log: Self.log, type: .default)
+    os_log("status() entered (gen6 hide-once-in-wallet)", log: Self.log, type: .default)
 
     // No cache yet (user has never logged into the host app, or cache went
     // stale past the 30-day budget). Wallet falls back to the "Open <App> to
@@ -118,6 +118,14 @@ import PassKit
         // Returning nil makes PassKit show the user a retry / cancel dialog.
         completion(nil)
       case .success(let response):
+        // Our own pass-library read returns empty in the appex (no App-ID
+        // visibility), so we'd keep offering this card after Wallet adds it.
+        // Record the add here so status()/passEntries() exclude it until the
+        // app's next sync rewrites the cache with fresh flags. Slight
+        // over-suppression if the user cancels after this point — corrected
+        // on the next app open, and retry-from-the-dialog is unaffected.
+        EligibilityCache.markProvisioned(cardId: identifier)
+        os_log("generate() succeeded → marked cardId=%{public}@ provisioned", log: Self.log, type: .default, identifier)
         let addRequest = PKAddPaymentPassRequest()
         addRequest.encryptedPassData = response.encryptedPassData
         addRequest.activationData = response.activationData
@@ -134,34 +142,98 @@ import PassKit
   /// a collision-guarded `last4`-suffix fallback for cards whose `panId`
   /// hasn't reached the cache yet — the decision itself lives in
   /// `ProvisioningEligibility` so it stays unit-testable without PassKit.
+  /// Grace window after an extension-side encrypt success during which an
+  /// unconfirmed marker still hides the card even with an authoritative
+  /// library — the pass takes a few moments (longer on yellow-path
+  /// activation) to land in the library after Wallet commits it.
+  private static let markerGraceSeconds: TimeInterval = 10 * 60
+
   private func eligibleCards(_ cards: [EligibilityCard], in library: PKPassLibrary, remote: Bool) -> [EligibilityCard] {
-    let passes: [PKSecureElementPass]
-    if remote {
-      passes = library.remoteSecureElementPasses
-    } else {
-      // passes() + secureElementPass — the exact call the host app's
-      // WalletManager uses and is proven to return payment passes. The
-      // deprecated passes(of: .payment) filter returned [] in the appex
-      // context even with entitlements in place, which silently forced
-      // flags mode (see the mode= log in eligibility below).
-      passes = library.passes().compactMap { $0.secureElementPass }
-    }
+    // passes() + secureElementPass — the exact call the host app's
+    // WalletManager uses and is proven to return payment passes. The
+    // deprecated passes(of: .payment) filter returned [] in the appex
+    // context even with entitlements in place.
+    let localPasses = library.passes().compactMap { $0.secureElementPass }
+    let remotePasses = remote ? library.remoteSecureElementPasses : []
+    // The remote (Watch) surface dedupes against the UNION of iPhone + Watch
+    // passes: once a card is anywhere in Apple Wallet, the issuer entry
+    // disappears entirely (product decision). Watch provisioning for an
+    // iPhone-resident card is served by Wallet's native "cards on your
+    // iPhone" mirror flow and the in-app Add-to-Watch button, not by this
+    // extension. A card on neither device stays listed on both surfaces, so
+    // provisioning a brand-new card straight to the Watch still works.
+    let passes = localPasses + remotePasses
     let panIds = Set(passes.compactMap { $0.primaryAccountIdentifier })
     let suffixes = Set(passes.map { ProvisioningEligibility.normalizedSuffix($0.primaryAccountNumberSuffix) })
+
+    // Once a surface has proven readable, remember it: from then on an empty
+    // read on that surface means "genuinely empty wallet" (live authority)
+    // rather than "no library access" (flags fallback) — this is what makes
+    // removing the LAST card re-offer it instead of trusting stale flags.
+    if !localPasses.isEmpty {
+      EligibilityCache.recordLiveLibrarySeen(remote: false)
+    }
+    if !remotePasses.isEmpty {
+      EligibilityCache.recordLiveLibrarySeen(remote: true)
+    }
+    let authoritative = !passes.isEmpty
+      || EligibilityCache.isLiveLibraryTrusted(remote: false)
+      || (remote && EligibilityCache.isLiveLibraryTrusted(remote: true))
+
+    // Just-provisioned markers (extension-side adds the app hasn't synced
+    // yet). With an authoritative library the marker is only a short bridge:
+    // confirmed by a live pass → drop it, the live dedup below takes over;
+    // still unconfirmed past the grace window → the add never completed or
+    // the pass was removed again → drop it and re-offer the card. Without
+    // library access the marker is the only signal and keeps hiding the card
+    // until the app's next sync or the marker TTL.
+    var last4Counts: [String: Int] = [:]
+    for card in cards { last4Counts[card.last4, default: 0] += 1 }
+    let markers = EligibilityCache.provisionedMarkers()
+    let now = Date()
+    let cards = cards.filter { card in
+      guard let markedAt = markers[card.cardId] else { return true }
+      guard authoritative else {
+        os_log("eligibility(remote=%{public}d): card last4=%{public}@ excluded (marker, library blind)", log: Self.log, type: .default, remote ? 1 : 0, card.last4)
+        return false
+      }
+      let confirmed: Bool
+      if let panId = card.panId, !panId.isEmpty {
+        confirmed = panIds.contains(panId)
+      } else {
+        confirmed = last4Counts[card.last4] == 1 && suffixes.contains(card.last4)
+      }
+      if confirmed {
+        // The live library sees the pass — it is the authority from here on.
+        EligibilityCache.clearProvisionedMarker(cardId: card.cardId)
+        return true
+      }
+      if now.timeIntervalSince(markedAt) < Self.markerGraceSeconds {
+        os_log("eligibility(remote=%{public}d): card last4=%{public}@ excluded (marker, pass materializing)", log: Self.log, type: .default, remote ? 1 : 0, card.last4)
+        return false
+      }
+      EligibilityCache.clearProvisionedMarker(cardId: card.cardId)
+      os_log("eligibility(remote=%{public}d): card last4=%{public}@ marker dropped (live library refuted it)", log: Self.log, type: .default, remote ? 1 : 0, card.last4)
+      return true
+    }
 
     let keys = cards.map { card in
       ProvisioningEligibility.CardKey(
         panId: card.panId,
         last4: card.last4,
-        // Per-surface verdict shipped by the host app (its pass-library read
-        // works; ours returns empty until Apple backend-enables the App ID).
-        alreadyProvisioned: (remote ? card.onWatch : card.onIphone) ?? false
+        // Host-app verdict — consulted only when the library is not
+        // authoritative. The remote surface mirrors the union rule above:
+        // a card already on the iPhone is not offered for the Watch.
+        alreadyProvisioned: remote
+          ? ((card.onWatch ?? false) || (card.onIphone ?? false))
+          : (card.onIphone ?? false)
       )
     }
     let indices = ProvisioningEligibility.eligibleIndices(
       cards: keys,
       provisionedPanIds: panIds,
-      provisionedSuffixes: suffixes
+      provisionedSuffixes: suffixes,
+      libraryAuthoritative: authoritative
     )
 
     // Debug detail: what the live library exposed and how each cached card was
@@ -169,13 +241,13 @@ import PassKit
     // with the app-side sync logs without dumping full FPANIDs.
     let panIdsDesc = panIds.map { String($0.suffix(6)) }.sorted().joined(separator: ",")
     let suffixesDesc = suffixes.sorted().joined(separator: ",")
-    // mode=live → decisions come from the pass library; mode=flags → library
-    // empty (no access or empty wallet), decisions fall back to the host
-    // app's onIphone/onWatch verdicts.
-    let mode = passes.isEmpty ? "flags" : "live"
+    // mode=live → passes enumerated; mode=live-empty → empty read but the
+    // surface is trusted (live-seen stamp), so empty means empty wallet;
+    // mode=flags → library blind, host-app onIphone/onWatch verdicts decide.
+    let mode = passes.isEmpty ? (authoritative ? "live-empty" : "flags") : "live"
     os_log(
-      "eligibility(remote=%{public}d): mode=%{public}@ %{public}d passes in library — suffixes=[%{public}@] panIds…=[%{public}@]",
-      log: Self.log, type: .default, remote ? 1 : 0, mode, passes.count, suffixesDesc, panIdsDesc
+      "eligibility(remote=%{public}d): mode=%{public}@ %{public}d passes in library — suffixes=[%{public}@] panIds…=[%{public}@] markers=%{public}d",
+      log: Self.log, type: .default, remote ? 1 : 0, mode, passes.count, suffixesDesc, panIdsDesc, markers.count
     )
     let eligibleSet = Set(indices)
     for (index, key) in keys.enumerated() {

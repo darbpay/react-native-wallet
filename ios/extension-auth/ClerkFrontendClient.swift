@@ -55,8 +55,22 @@ final class ClerkFrontendClient {
 
   struct PreparedSignIn {
     let signInId: String
-    let phoneNumberId: String
+    /// Present when the account offers `phone_code` as a first factor. Absent
+    /// for MFA-reserved phones (Clerk excludes phone_code from first factors
+    /// when the phone serves as factor two — DARB-427).
+    let phoneNumberId: String?
     let safeIdentifier: String?
+    /// True when the account has a password first factor. Mirrors the host
+    /// app's flow: password accounts sign in with it; passwordless accounts
+    /// must complete setup in the app (the inline sheet doesn't replicate the
+    /// OTP-verified set-password flow).
+    let hasPasswordFactor: Bool
+  }
+
+  /// Outcome of a password first-factor attempt.
+  enum PasswordAttemptResult {
+    case complete(sessionId: String)
+    case needsSecondFactor
   }
 
   struct MintedToken {
@@ -115,22 +129,21 @@ final class ClerkFrontendClient {
 
   // MARK: - Sign-in flow
 
-  /// `signIn.create({ identifier })` — starts a sign-in and resolves the
-  /// `phone_code` first factor.
+  /// `signIn.create({ identifier })` — starts a sign-in and inspects the
+  /// supported first factors (password / phone_code).
   func createSignIn(identifier: String) async throws -> PreparedSignIn {
     let json = try await post(path: "client/sign_ins", form: ["identifier": identifier])
     let response = (json["response"] as? [String: Any]) ?? json
     guard let signInId = response["id"] as? String else { throw ClerkError.parse }
 
     let factors = (response["supported_first_factors"] as? [[String: Any]]) ?? []
-    guard let phone = factors.first(where: { ($0["strategy"] as? String) == "phone_code" }),
-          let phoneNumberId = phone["phone_number_id"] as? String else {
-      throw ClerkError.noPhoneFactor
-    }
+    let hasPassword = factors.contains { ($0["strategy"] as? String) == "password" }
+    let phone = factors.first(where: { ($0["strategy"] as? String) == "phone_code" })
     return PreparedSignIn(
       signInId: signInId,
-      phoneNumberId: phoneNumberId,
-      safeIdentifier: phone["safe_identifier"] as? String
+      phoneNumberId: phone?["phone_number_id"] as? String,
+      safeIdentifier: phone?["safe_identifier"] as? String,
+      hasPasswordFactor: hasPassword
     )
   }
 
@@ -157,6 +170,63 @@ final class ClerkFrontendClient {
     return sessionId
   }
 
+  /// `signIn.attemptFirstFactor({ strategy: 'password', password })` — the
+  /// primary sign-in path since the app made passwords mandatory. `complete`
+  /// yields a session; `needs_second_factor` means the account has phone MFA
+  /// and the caller must run prepare/attemptSecondFactor next.
+  func attemptPassword(signInId: String, password: String) async throws -> PasswordAttemptResult {
+    let json = try await post(
+      path: "client/sign_ins/\(signInId)/attempt_first_factor",
+      form: ["strategy": "password", "password": password]
+    )
+    let response = (json["response"] as? [String: Any]) ?? json
+    let status = response["status"] as? String ?? "unknown"
+    switch status {
+    case "complete":
+      guard let sessionId = response["created_session_id"] as? String else { throw ClerkError.parse }
+      return .complete(sessionId: sessionId)
+    case "needs_second_factor":
+      return .needsSecondFactor
+    default:
+      throw ClerkError.signInIncomplete(status: status)
+    }
+  }
+
+  /// `signIn.prepareSecondFactor({ strategy: 'phone_code' })` — sends the MFA
+  /// SMS after a successful password attempt.
+  func prepareSecondFactor(signInId: String) async throws {
+    _ = try await post(
+      path: "client/sign_ins/\(signInId)/prepare_second_factor",
+      form: ["strategy": "phone_code"]
+    )
+  }
+
+  /// `signIn.attemptSecondFactor({ strategy: 'phone_code', code })` — verifies
+  /// the MFA OTP. Returns the created session id.
+  func attemptSecondFactor(signInId: String, code: String) async throws -> String {
+    let json = try await post(
+      path: "client/sign_ins/\(signInId)/attempt_second_factor",
+      form: ["strategy": "phone_code", "code": code]
+    )
+    let response = (json["response"] as? [String: Any]) ?? json
+    let status = response["status"] as? String ?? "unknown"
+    guard status == "complete" else { throw ClerkError.signInIncomplete(status: status) }
+    guard let sessionId = response["created_session_id"] as? String else { throw ClerkError.parse }
+    return sessionId
+  }
+
+  /// `GET /v1/me` — the signed-in user's display name, used as the cardholder
+  /// fallback when a card carries no embossing name. Best-effort: callers
+  /// treat nil/throw as "no fallback available".
+  func fetchUserFullName() async throws -> String? {
+    let json = try await request(method: "GET", path: "me", form: [:])
+    let response = (json["response"] as? [String: Any]) ?? json
+    let first = (response["first_name"] as? String) ?? ""
+    let last = (response["last_name"] as? String) ?? ""
+    let full = [first, last].filter { !$0.isEmpty }.joined(separator: " ")
+    return full.isEmpty ? nil : full
+  }
+
   /// Mints the JWT-template token for the session and decodes its expiry.
   func mintToken(sessionId: String) async throws -> MintedToken {
     let json = try await post(
@@ -173,6 +243,10 @@ final class ClerkFrontendClient {
   // MARK: - HTTP
 
   private func post(path: String, form: [String: String]) async throws -> [String: Any] {
+    try await request(method: "POST", path: path, form: form)
+  }
+
+  private func request(method: String, path: String, form: [String: String]) async throws -> [String: Any] {
     guard let base = Self.fapiBaseURL() else { throw ClerkError.notConfigured }
 
     var comps = URLComponents(
@@ -187,11 +261,13 @@ final class ClerkFrontendClient {
     ]
 
     var request = URLRequest(url: comps.url!)
-    request.httpMethod = "POST"
-    request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    request.httpMethod = method
     // Empty on the first call; the captured client JWT thereafter.
     request.setValue(clientToken, forHTTPHeaderField: "Authorization")
-    request.httpBody = Self.formEncode(form).data(using: .utf8)
+    if method != "GET" {
+      request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+      request.httpBody = Self.formEncode(form).data(using: .utf8)
+    }
 
     let data: Data
     let response: URLResponse

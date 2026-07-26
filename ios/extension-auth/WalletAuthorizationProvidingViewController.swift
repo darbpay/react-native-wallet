@@ -40,7 +40,12 @@ import UIKit
 
   // MARK: - State (mirrors useLoginFlow)
 
-  private enum Phase { case phone, otp }
+  // phone → password → (otp, only for MFA accounts). Passwords are mandatory
+  // in the host app's sign-in since DARB password rollout; the old
+  // phone_code-first-factor path is gone. Passwordless accounts must finish
+  // setup in the app — the inline sheet doesn't replicate the OTP-verified
+  // set-password flow.
+  private enum Phase { case phone, password, otp }
   private var phase: Phase = .phone
   private var selectedCountry: Country = LOGIN_COUNTRIES[0]
   private var phoneDigits: String = ""
@@ -122,6 +127,92 @@ import UIKit
     onTextChange: { [weak self] in self?.phoneChanged() }
   )
 
+  // MARK: Password phase views
+
+  private let passwordLogoView = DarbLogoView()
+
+  private let passwordBackButton: UIButton = {
+    let b = UIButton(type: .system)
+    let cfg = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+    b.setImage(UIImage(systemName: "chevron.left", withConfiguration: cfg), for: .normal)
+    b.tintColor = DarbColors.foreground
+    return b
+  }()
+
+  private let passwordTitle: UILabel = {
+    let l = UILabel()
+    l.font = .systemFont(ofSize: 21.5, weight: .bold)
+    l.textColor = DarbColors.foreground
+    l.numberOfLines = 0
+    l.textAlignment = .center
+    l.text = LoginCopy.passwordScreenTitle
+    return l
+  }()
+
+  private let passwordSubtitle: UILabel = {
+    let l = UILabel()
+    l.font = .systemFont(ofSize: 16, weight: .regular)
+    l.textColor = DarbColors.mutedForeground
+    l.numberOfLines = 0
+    l.textAlignment = .center
+    l.text = LoginCopy.passwordScreenSubtitle
+    return l
+  }()
+
+  private let passwordPhoneLabel: UILabel = {
+    let l = UILabel()
+    l.font = .systemFont(ofSize: 17, weight: .regular)
+    l.textColor = DarbColors.mutedForeground
+    l.textAlignment = .center
+    return l
+  }()
+
+  private lazy var passwordField: UITextField = {
+    let f = UITextField()
+    f.isSecureTextEntry = true
+    f.textContentType = .password
+    f.autocapitalizationType = .none
+    f.autocorrectionType = .no
+    f.font = .systemFont(ofSize: 17, weight: .regular)
+    f.textColor = DarbColors.foreground
+    f.placeholder = LoginCopy.passwordPlaceholder
+    f.returnKeyType = .go
+    f.layer.borderWidth = 1
+    f.layer.borderColor = DarbColors.borderLight.cgColor
+    f.layer.cornerRadius = 12
+    f.backgroundColor = DarbColors.backgroundSecondary
+    // Inset the text from the rounded border.
+    let pad = UIView(frame: CGRect(x: 0, y: 0, width: 16, height: 56))
+    f.leftView = pad
+    f.leftViewMode = .always
+    f.rightView = UIView(frame: CGRect(x: 0, y: 0, width: 16, height: 56))
+    f.rightViewMode = .always
+    f.addTarget(self, action: #selector(passwordChanged), for: .editingChanged)
+    f.addTarget(self, action: #selector(passwordReturnTapped), for: .editingDidEndOnExit)
+    return f
+  }()
+
+  private let passwordErrorLabel: UILabel = {
+    let l = UILabel()
+    l.font = .systemFont(ofSize: 14, weight: .regular)
+    l.textColor = DarbColors.destructive
+    l.numberOfLines = 0
+    l.textAlignment = .center
+    return l
+  }()
+
+  // The inline sheet deliberately doesn't replicate the app's reset flow —
+  // point the user at the app instead of a dead-end "Forgot?" button.
+  private let passwordHintLabel: UILabel = {
+    let l = UILabel()
+    l.font = .systemFont(ofSize: 14, weight: .medium)
+    l.textColor = DarbColors.mutedForeground
+    l.numberOfLines = 0
+    l.textAlignment = .center
+    l.text = LoginCopy.forgotPasswordHint
+    return l
+  }()
+
   private lazy var otpCellsView: OtpCellsView = {
     let v = OtpCellsView(length: OTP_LENGTH)
     v.onChange = { [weak self] value in self?.otpChanged(value) }
@@ -170,6 +261,7 @@ import UIKit
 
   // Phase-grouping containers so we can toggle visibility wholesale.
   private let phoneContainer = UIView()
+  private let passwordContainer = UIView()
   private let otpContainer = UIView()
 
   // "Done" toolbar shared by the phone field and the hidden OTP field —
@@ -217,6 +309,7 @@ import UIKit
     // actually presented us.
     switch phase {
     case .phone: _ = phoneInputRow.becomeFirstResponder()
+    case .password: _ = passwordField.becomeFirstResponder()
     case .otp: _ = otpCellsView.becomeFirstResponder()
     }
   }
@@ -229,10 +322,12 @@ import UIKit
 
   private func buildLayout() {
     phoneContainer.translatesAutoresizingMaskIntoConstraints = false
+    passwordContainer.translatesAutoresizingMaskIntoConstraints = false
     otpContainer.translatesAutoresizingMaskIntoConstraints = false
     primaryButton.translatesAutoresizingMaskIntoConstraints = false
     spinner.translatesAutoresizingMaskIntoConstraints = false
     view.addSubview(phoneContainer)
+    view.addSubview(passwordContainer)
     view.addSubview(otpContainer)
     view.addSubview(primaryButton)
     view.addSubview(spinner)
@@ -243,6 +338,11 @@ import UIKit
       phoneContainer.leadingAnchor.constraint(equalTo: safe.leadingAnchor),
       phoneContainer.trailingAnchor.constraint(equalTo: safe.trailingAnchor),
       phoneContainer.bottomAnchor.constraint(equalTo: primaryButton.topAnchor, constant: -8),
+
+      passwordContainer.topAnchor.constraint(equalTo: safe.topAnchor),
+      passwordContainer.leadingAnchor.constraint(equalTo: safe.leadingAnchor),
+      passwordContainer.trailingAnchor.constraint(equalTo: safe.trailingAnchor),
+      passwordContainer.bottomAnchor.constraint(equalTo: primaryButton.topAnchor, constant: -8),
 
       otpContainer.topAnchor.constraint(equalTo: safe.topAnchor),
       otpContainer.leadingAnchor.constraint(equalTo: safe.leadingAnchor),
@@ -262,7 +362,78 @@ import UIKit
     ])
 
     buildPhonePhase()
+    buildPasswordPhase()
     buildOtpPhase()
+  }
+
+  private func buildPasswordPhase() {
+    let topBar = UIView()
+    topBar.translatesAutoresizingMaskIntoConstraints = false
+    passwordBackButton.translatesAutoresizingMaskIntoConstraints = false
+    topBar.addSubview(passwordBackButton)
+
+    passwordLogoView.translatesAutoresizingMaskIntoConstraints = false
+    let logoBox = UIView()
+    logoBox.translatesAutoresizingMaskIntoConstraints = false
+    logoBox.addSubview(passwordLogoView)
+
+    let headingStack = UIStackView(arrangedSubviews: [passwordTitle, passwordSubtitle, passwordPhoneLabel])
+    headingStack.axis = .vertical
+    headingStack.spacing = 8
+    headingStack.alignment = .fill
+    headingStack.setCustomSpacing(4, after: passwordSubtitle)
+    headingStack.translatesAutoresizingMaskIntoConstraints = false
+
+    passwordField.translatesAutoresizingMaskIntoConstraints = false
+    passwordErrorLabel.translatesAutoresizingMaskIntoConstraints = false
+    passwordHintLabel.translatesAutoresizingMaskIntoConstraints = false
+
+    passwordContainer.addSubview(topBar)
+    passwordContainer.addSubview(logoBox)
+    passwordContainer.addSubview(headingStack)
+    passwordContainer.addSubview(passwordField)
+    passwordContainer.addSubview(passwordErrorLabel)
+    passwordContainer.addSubview(passwordHintLabel)
+
+    NSLayoutConstraint.activate([
+      topBar.topAnchor.constraint(equalTo: passwordContainer.topAnchor, constant: 10),
+      topBar.leadingAnchor.constraint(equalTo: passwordContainer.leadingAnchor, constant: 20),
+      topBar.trailingAnchor.constraint(equalTo: passwordContainer.trailingAnchor, constant: -20),
+      topBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
+
+      passwordBackButton.leadingAnchor.constraint(equalTo: topBar.leadingAnchor),
+      passwordBackButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
+      passwordBackButton.widthAnchor.constraint(equalToConstant: 28),
+      passwordBackButton.heightAnchor.constraint(equalToConstant: 28),
+
+      logoBox.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 36),
+      logoBox.leadingAnchor.constraint(equalTo: passwordContainer.leadingAnchor, constant: 20),
+      logoBox.trailingAnchor.constraint(equalTo: passwordContainer.trailingAnchor, constant: -20),
+
+      passwordLogoView.centerXAnchor.constraint(equalTo: logoBox.centerXAnchor),
+      passwordLogoView.topAnchor.constraint(equalTo: logoBox.topAnchor),
+      passwordLogoView.bottomAnchor.constraint(equalTo: logoBox.bottomAnchor),
+      passwordLogoView.widthAnchor.constraint(equalToConstant: 120),
+      passwordLogoView.heightAnchor.constraint(equalToConstant: 48),
+
+      headingStack.topAnchor.constraint(equalTo: logoBox.bottomAnchor, constant: 40),
+      headingStack.leadingAnchor.constraint(equalTo: passwordContainer.leadingAnchor, constant: 20),
+      headingStack.trailingAnchor.constraint(equalTo: passwordContainer.trailingAnchor, constant: -20),
+
+      passwordField.topAnchor.constraint(equalTo: headingStack.bottomAnchor, constant: 28),
+      passwordField.leadingAnchor.constraint(equalTo: passwordContainer.leadingAnchor, constant: 20),
+      passwordField.trailingAnchor.constraint(equalTo: passwordContainer.trailingAnchor, constant: -20),
+      passwordField.heightAnchor.constraint(equalToConstant: 56),
+
+      passwordErrorLabel.topAnchor.constraint(equalTo: passwordField.bottomAnchor, constant: 8),
+      passwordErrorLabel.leadingAnchor.constraint(equalTo: passwordContainer.leadingAnchor, constant: 20),
+      passwordErrorLabel.trailingAnchor.constraint(equalTo: passwordContainer.trailingAnchor, constant: -20),
+      passwordErrorLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 20),
+
+      passwordHintLabel.topAnchor.constraint(equalTo: passwordErrorLabel.bottomAnchor, constant: 8),
+      passwordHintLabel.leadingAnchor.constraint(equalTo: passwordContainer.leadingAnchor, constant: 20),
+      passwordHintLabel.trailingAnchor.constraint(equalTo: passwordContainer.trailingAnchor, constant: -20),
+    ])
   }
 
   private func buildPhonePhase() {
@@ -417,6 +588,7 @@ import UIKit
 
   private func wireGestures() {
     backButton.addTarget(self, action: #selector(backTapped), for: .touchUpInside)
+    passwordBackButton.addTarget(self, action: #selector(passwordBackTapped), for: .touchUpInside)
     resendLabel.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(resendTapped)))
   }
 
@@ -426,6 +598,7 @@ import UIKit
     switch phase {
     case .phone:
       phoneContainer.isHidden = false
+      passwordContainer.isHidden = true
       otpContainer.isHidden = true
       primaryButton.isHidden = false
 
@@ -436,8 +609,21 @@ import UIKit
       primaryButton.setEnabledState(ready)
       primaryButton.setLoading(isSubmitting)
       _ = phoneInputRow.becomeFirstResponder()
+    case .password:
+      phoneContainer.isHidden = true
+      passwordContainer.isHidden = false
+      otpContainer.isHidden = true
+      primaryButton.isHidden = false
+
+      passwordPhoneLabel.text = isolatedPhone()
+      passwordErrorLabel.text = errorMessage
+      let ready = !(passwordField.text ?? "").isEmpty && !isSubmitting
+      primaryButton.setEnabledState(ready)
+      primaryButton.setLoading(isSubmitting)
+      _ = passwordField.becomeFirstResponder()
     case .otp:
       phoneContainer.isHidden = true
+      passwordContainer.isHidden = true
       otpContainer.isHidden = false
       primaryButton.isHidden = true
 
@@ -505,15 +691,43 @@ import UIKit
   }
 
   @objc private func primaryTapped() {
-    sendCode()
+    switch phase {
+    case .phone: continueFromPhone()
+    case .password: submitPassword()
+    case .otp: break
+    }
   }
 
+  @objc private func passwordChanged() {
+    if errorMessage != nil { errorMessage = nil; passwordErrorLabel.text = nil }
+    let ready = !(passwordField.text ?? "").isEmpty && !isSubmitting
+    primaryButton.setEnabledState(ready)
+  }
+
+  @objc private func passwordReturnTapped() {
+    if phase == .password, !isSubmitting, !(passwordField.text ?? "").isEmpty {
+      submitPassword()
+    }
+  }
+
+  /// Back from the MFA OTP: the sign-in attempt was consumed by the password
+  /// factor — restart from scratch (mirrors the app's handleBackFromOtp).
   @objc private func backTapped() {
     phase = .phone
     otpValue = ""
+    passwordField.text = ""
     errorMessage = nil
+    prepared = nil
     stopCooldownTimer()
     cooldown = 0
+    render()
+  }
+
+  @objc private func passwordBackTapped() {
+    phase = .phone
+    passwordField.text = ""
+    errorMessage = nil
+    prepared = nil
     render()
   }
 
@@ -529,13 +743,13 @@ import UIKit
   @objc private func doneTapped() {
     view.endEditing(true)
     if phase == .phone, !isSubmitting, phoneDigits.count == selectedCountry.digits {
-      sendCode()
+      continueFromPhone()
     }
   }
 
-  // MARK: - Flow
+  // MARK: - Flow (mirrors use-login-flow.ts: phone → password → optional MFA OTP)
 
-  private func sendCode() {
+  private func continueFromPhone() {
     guard phoneDigits.count == selectedCountry.digits else { return }
     let identifier = "\(selectedCountry.code)\(phoneDigits)"
     setSubmitting(true)
@@ -545,18 +759,54 @@ import UIKit
     Task {
       do {
         let prepared = try await client.createSignIn(identifier: identifier)
-        try await client.prepareFirstFactor(signInId: prepared.signInId, phoneNumberId: prepared.phoneNumberId)
         await MainActor.run {
           self.prepared = prepared
-          self.phase = .otp
-          self.otpValue = ""
-          self.errorMessage = nil
           self.setSubmitting(false)
-          self.startCooldownTimer(seconds: 90)
-          self.render()
+          // Passwords are mandatory: accounts that have one enter it inline;
+          // accounts without one must finish the OTP-verified setup in the
+          // Darb app (the sheet doesn't replicate set-password).
+          if prepared.hasPasswordFactor {
+            self.phase = .password
+            self.passwordField.text = ""
+            self.errorMessage = nil
+            self.render()
+          } else {
+            self.errorMessage = LoginCopy.passwordSetupInApp
+            self.phoneInputRow.hasError = true
+            self.phoneErrorLabel.text = LoginCopy.passwordSetupInApp
+          }
         }
       } catch {
         await self.showError(error, fallback: LoginCopy.failedToSendCode)
+      }
+    }
+  }
+
+  private func submitPassword() {
+    guard let prepared, let password = passwordField.text, !password.isEmpty else { return }
+    setSubmitting(true)
+    errorMessage = nil
+    passwordErrorLabel.text = nil
+
+    Task {
+      do {
+        let result = try await client.attemptPassword(signInId: prepared.signInId, password: password)
+        switch result {
+        case .complete(let sessionId):
+          await self.completeAuthorization(sessionId: sessionId)
+        case .needsSecondFactor:
+          try await self.client.prepareSecondFactor(signInId: prepared.signInId)
+          await MainActor.run {
+            self.phase = .otp
+            self.otpValue = ""
+            self.errorMessage = nil
+            self.setSubmitting(false)
+            self.startCooldownTimer(seconds: 90)
+            self.render()
+          }
+        }
+      } catch {
+        await self.showError(error, fallback: LoginCopy.signInFailed)
       }
     }
   }
@@ -570,14 +820,38 @@ import UIKit
 
     Task {
       do {
-        let sessionId = try await client.attemptFirstFactor(signInId: prepared.signInId, code: code)
-        let token = try await client.mintToken(sessionId: sessionId)
-        try SharedKeychain.setAuthToken(token.jwt, expiresAt: token.expiresAt)
-        os_log("auth UI → token written, reporting .authorized", log: Self.log, type: .default)
-        await MainActor.run { self.finish(.authorized) }
+        let sessionId = try await client.attemptSecondFactor(signInId: prepared.signInId, code: code)
+        await self.completeAuthorization(sessionId: sessionId)
       } catch {
         await self.showError(error, fallback: LoginCopy.invalidCode)
       }
+    }
+  }
+
+  /// Shared tail of both sign-in paths: mint the template token, persist it,
+  /// refresh the eligibility cache for THIS user (multi-account fix — the
+  /// cache may still hold the previous account's cards), then authorize so
+  /// Wallet re-polls the non-UI extension against the fresh state.
+  private func completeAuthorization(sessionId: String) async {
+    do {
+      let token = try await client.mintToken(sessionId: sessionId)
+      try SharedKeychain.setAuthToken(token.jwt, expiresAt: token.expiresAt)
+      os_log("auth UI → token written", log: Self.log, type: .default)
+
+      // Best-effort: a failed refresh keeps the existing cache (same-user
+      // re-login stays seamless) and never blocks the authorization.
+      let fallbackName = (try? await client.fetchUserFullName()).flatMap { $0 } ?? ""
+      let refreshed = await WalletCardsClient.refreshEligibleCards(
+        bearerToken: token.jwt,
+        fallbackName: fallbackName
+      )
+      os_log(
+        "auth UI → cards refresh %{public}@, reporting .authorized",
+        log: Self.log, type: .default, refreshed ? "OK" : "skipped"
+      )
+      await MainActor.run { self.finish(.authorized) }
+    } catch {
+      await self.showError(error, fallback: LoginCopy.signInFailed)
     }
   }
 
@@ -589,7 +863,7 @@ import UIKit
 
     Task {
       do {
-        try await client.prepareFirstFactor(signInId: prepared.signInId, phoneNumberId: prepared.phoneNumberId)
+        try await client.prepareSecondFactor(signInId: prepared.signInId)
         await MainActor.run {
           self.setSubmitting(false)
           self.startCooldownTimer(seconds: 90)
@@ -607,6 +881,11 @@ import UIKit
     let code = (api.code ?? "").lowercased()
     let msg = (api.message ?? "").lowercased()
 
+    // Wrong-password has its own mapping; an unmapped error is NOT a wrong
+    // password (rate limit, lockout, network...) — never blame the password.
+    if code == "form_password_incorrect" || msg.contains("password is incorrect") {
+      return LoginCopy.incorrectPassword
+    }
     if code.contains("identifier") || code.contains("phone_number")
         || msg.contains("identifier is invalid") || msg.contains("invalid phone") {
       return LoginCopy.invalidPhoneSimple
@@ -630,6 +909,10 @@ import UIKit
     case .phone:
       phoneInputRow.hasError = true
       phoneErrorLabel.text = message
+    case .password:
+      passwordErrorLabel.text = message
+      passwordField.text = ""
+      primaryButton.setEnabledState(false)
     case .otp:
       otpErrorLabel.text = message
       otpValue = ""
@@ -641,9 +924,15 @@ import UIKit
     isSubmitting = submitting
     if submitting { spinner.startAnimating() } else { spinner.stopAnimating() }
     phoneInputRow.isEnabled = !submitting
+    passwordField.isEnabled = !submitting
     otpCellsView.setEnabled(!submitting)
     primaryButton.setLoading(submitting)
-    let ready = phoneDigits.count == selectedCountry.digits && !submitting
+    let ready: Bool
+    switch phase {
+    case .phone: ready = phoneDigits.count == selectedCountry.digits && !submitting
+    case .password: ready = !(passwordField.text ?? "").isEmpty && !submitting
+    case .otp: ready = false
+    }
     primaryButton.setEnabledState(ready)
   }
 
@@ -731,6 +1020,15 @@ fileprivate enum LoginCopy {
   static let failedToSendCode = "Failed to send verification code"
   static let failedToResend = "Failed to resend code"
   static let verificationCodeRateLimitExceeded = "Too many attempts. Please wait before requesting a new code."
+  static let incorrectPassword = "Incorrect password. Please try again."
+  static let signInFailed = "Couldn't sign in. Please try again."
+  static let passwordSetupInApp = "Please open the Darb app to finish setting up your account, then try again."
+
+  // Password screen
+  static let passwordScreenTitle = "Enter your password"
+  static let passwordScreenSubtitle = "Enter the password for the account"
+  static let passwordPlaceholder = "Password"
+  static let forgotPasswordHint = "Forgot your password? You can reset it in the Darb app."
 
   // OTP screen
   static let enterVerificationCode = "Enter verification code"

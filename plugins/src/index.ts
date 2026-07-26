@@ -129,6 +129,13 @@ type ResolvedExtensionConfig = {
 type ResolvedAuthExtensionConfig = {
   /** Inherited from the parent walletExtension config — the two extensions share state via this App Group. */
   appGroup: string;
+  /**
+   * Inherited from the parent walletExtension config. The auth extension
+   * refreshes the eligibility cache with the logged-in user's cards right
+   * after a successful inline sign-in (multi-account correctness), so it
+   * needs the same issuer API base the non-UI extension uses for encrypt.
+   */
+  encryptBaseUrl: string;
   bundleSuffix: string;
   targetName: string;
   className: string;
@@ -145,14 +152,15 @@ function resolveExtensionConfig(config: WalletExtensionConfig): ResolvedExtensio
     className: config.className ?? EXTENSION_DEFAULTS.className,
   };
   if (config.auth) {
-    resolved.auth = resolveAuthExtensionConfig(resolved.appGroup, config.auth);
+    resolved.auth = resolveAuthExtensionConfig(resolved.appGroup, resolved.encryptBaseUrl, config.auth);
   }
   return resolved;
 }
 
-function resolveAuthExtensionConfig(appGroup: string, auth: WalletExtensionAuthConfig): ResolvedAuthExtensionConfig {
+function resolveAuthExtensionConfig(appGroup: string, encryptBaseUrl: string, auth: WalletExtensionAuthConfig): ResolvedAuthExtensionConfig {
   return {
     appGroup,
+    encryptBaseUrl,
     bundleSuffix: auth.bundleSuffix ?? AUTH_EXTENSION_DEFAULTS.bundleSuffix,
     targetName: auth.targetName ?? AUTH_EXTENSION_DEFAULTS.targetName,
     className: auth.className ?? AUTH_EXTENSION_DEFAULTS.className,
@@ -588,6 +596,8 @@ function buildAuthExtensionInfoPlist(ext: ResolvedAuthExtensionConfig): string {
   <string>${ext.clerkPublishableKey}</string>
   <key>${AUTH_EXTENSION_DEFAULTS.jwtTemplateInfoPlistKey}</key>
   <string>${ext.jwtTemplate}</string>
+  <key>${EXTENSION_DEFAULTS.encryptBaseUrlInfoPlistKey}</key>
+  <string>${ext.encryptBaseUrl}</string>
   <key>NSExtension</key>
   <dict>
     <key>NSExtensionPointIdentifier</key>
