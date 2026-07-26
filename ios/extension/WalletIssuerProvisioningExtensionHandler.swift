@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import os.log
 import PassKit
 
@@ -35,8 +36,8 @@ import PassKit
     result.requiresAuthentication = false
 
     // Build marker: proves which handler generation is actually installed —
-    // if Console.app doesn't show "gen2", the extension target wasn't rebuilt.
-    os_log("status() entered (gen6 hide-once-in-wallet)", log: Self.log, type: .default)
+    // if Console.app doesn't show "gen7", the extension target wasn't rebuilt.
+    os_log("status() entered (gen7 live-library-authority)", log: Self.log, type: .default)
 
     // No cache yet (user has never logged into the host app, or cache went
     // stale past the 30-day budget). Wallet falls back to the "Open <App> to
@@ -59,15 +60,18 @@ import PassKit
     // fallback) — which used to be acceptable when we only shipped the non-UI
     // extension, but now defeats the purpose of bundling the UI extension.
     //
-    // Eligibility is decided against the LIVE pass library (panId, with a
-    // last4-suffix fallback for cards whose panId hasn't reached the cache) —
-    // never against a write-time snapshot. When every cached card is already
-    // provisioned on both surfaces, both flags come back false and Wallet
-    // removes the issuer row entirely (Apple: "all cards are already
-    // provisioned" → hidden).
-    let library = PKPassLibrary()
-    let localEligible = eligibleCards(file.cards, in: library, remote: false)
-    let remoteEligible = eligibleCards(file.cards, in: library, remote: true)
+    // Eligibility is decided against the LIVE pass library, the single
+    // authority (Apple dev guide §10.2: exclude passes already on the device;
+    // FAQ p.90: "update these values based on their presence"). Card in the
+    // library → hidden; card absent → offered, including after a failed add.
+    // Both surfaces are answered from ONE library snapshot, and this method
+    // performs no writes before completing — Apple ignores the extension if
+    // status isn't delivered within 100 ms.
+    let snapshot = librarySnapshot()
+    let markers = EligibilityCache.provisionedMarkers()
+    var markerClears = Set<String>()
+    let localEligible = eligibleCards(file.cards, snapshot: snapshot, remote: false, markers: markers, markerClears: &markerClears)
+    let remoteEligible = eligibleCards(file.cards, snapshot: snapshot, remote: true, markers: markers, markerClears: &markerClears)
     result.passEntriesAvailable = !localEligible.isEmpty
     result.remotePassEntriesAvailable = !remoteEligible.isEmpty
 
@@ -83,16 +87,26 @@ import PassKit
       os_log("status() → passEntries=%{public}d remotePass=%{public}d cardCount=%{public}d", log: Self.log, type: .default, result.passEntriesAvailable ? 1 : 0, result.remotePassEntriesAvailable ? 1 : 0, file.cards.count)
     }
     completion(result)
+
+    // Bookkeeping strictly AFTER the answer is delivered: marker clears only
+    // affect FUTURE invocations (this one already decided from the in-memory
+    // snapshot), and losing one to appex teardown is self-healing — the next
+    // invocation re-derives the same verdict.
+    Self.applyMarkerClears(markerClears)
   }
 
   // MARK: - entries (<100ms, no network)
 
   open override func passEntries(completion: @escaping ([PKIssuerProvisioningExtensionPassEntry]) -> Void) {
-    completion(buildEntries(remote: false))
+    let (entries, markerClears) = buildEntries(remote: false)
+    completion(entries)
+    Self.applyMarkerClears(markerClears)
   }
 
   open override func remotePassEntries(completion: @escaping ([PKIssuerProvisioningExtensionPassEntry]) -> Void) {
-    completion(buildEntries(remote: true))
+    let (entries, markerClears) = buildEntries(remote: true)
+    completion(entries)
+    Self.applyMarkerClears(markerClears)
   }
 
   // MARK: - generate request (larger budget, performs network)
@@ -137,24 +151,70 @@ import PassKit
 
   // MARK: - Helpers
 
-  /// The cached cards still eligible for the given surface, decided against
-  /// the live pass library at call time. Dedup is `panId` first (exact), then
-  /// a collision-guarded `last4`-suffix fallback for cards whose `panId`
-  /// hasn't reached the cache yet — the decision itself lives in
-  /// `ProvisioningEligibility` so it stays unit-testable without PassKit.
   /// Grace window after an extension-side encrypt success during which an
-  /// unconfirmed marker still hides the card even with an authoritative
-  /// library — the pass takes a few moments (longer on yellow-path
-  /// activation) to land in the library after Wallet commits it.
-  private static let markerGraceSeconds: TimeInterval = 10 * 60
+  /// unconfirmed just-provisioned marker still hides the card. This is the
+  /// ONLY job markers have left: bridging the few seconds between Wallet
+  /// committing a successful add and the pass landing in the library (a
+  /// touch longer for the Watch mirror). Past this window an absent pass
+  /// means the add failed, was cancelled, or the pass was removed — and the
+  /// card MUST be offered again (Issuer Functional Requirements 4.7: offer
+  /// provisioning for all Eligible Cards). Keep this short: every second
+  /// here is a second a failed add stays invisible in Wallet's "+" list.
+  /// 60s covers the Apple/PNO provisioning round trip + library commit with
+  /// margin; only a pathologically slow Watch mirror would outlive it, and
+  /// the app's next sync corrects that case anyway.
+  private static let markerGraceSeconds: TimeInterval = 60
 
-  private func eligibleCards(_ cards: [EligibilityCard], in library: PKPassLibrary, remote: Bool) -> [EligibilityCard] {
+  /// One read of both pass-library surfaces, shared by every decision in a
+  /// single extension invocation so iPhone and Watch answers come from the
+  /// same snapshot (and the XPC enumeration cost is paid once).
+  private struct LibrarySnapshot {
+    let localPasses: [PKSecureElementPass]
+    let remotePasses: [PKSecureElementPass]
+  }
+
+  private func librarySnapshot() -> LibrarySnapshot {
     // passes() + secureElementPass — the exact call the host app's
     // WalletManager uses and is proven to return payment passes. The
     // deprecated passes(of: .payment) filter returned [] in the appex
     // context even with entitlements in place.
-    let localPasses = library.passes().compactMap { $0.secureElementPass }
-    let remotePasses = remote ? library.remoteSecureElementPasses : []
+    let library = PKPassLibrary()
+    return LibrarySnapshot(
+      localPasses: library.passes().compactMap { $0.secureElementPass },
+      remotePasses: library.remoteSecureElementPasses
+    )
+  }
+
+  /// Applies deferred marker clears off the caller's thread. Called strictly
+  /// AFTER a completion handler has been invoked — clears only influence
+  /// future invocations, so the current answer never waits on disk I/O.
+  private static func applyMarkerClears(_ cardIds: Set<String>) {
+    guard !cardIds.isEmpty else { return }
+    DispatchQueue.global(qos: .utility).async {
+      for cardId in cardIds {
+        EligibilityCache.clearProvisionedMarker(cardId: cardId)
+      }
+    }
+  }
+
+  /// The cached cards still eligible for the given surface. The LIVE pass
+  /// library is the single authority (Apple dev guide §10.2 / FAQ p.90):
+  /// present → hidden, absent → offered. Dedup is `panId` first (exact),
+  /// then a collision-guarded `last4`-suffix fallback for cards whose
+  /// `panId` hasn't reached the cache yet — the decision itself lives in
+  /// `ProvisioningEligibility` so it stays unit-testable without PassKit.
+  ///
+  /// Markers never hide a card beyond `markerGraceSeconds`; cardIds whose
+  /// marker is confirmed or refuted by the library are added to
+  /// `markerClears` for the caller to apply AFTER its completion handler.
+  private func eligibleCards(
+    _ cards: [EligibilityCard],
+    snapshot: LibrarySnapshot,
+    remote: Bool,
+    markers: [String: Date],
+    markerClears: inout Set<String>,
+    now: Date = Date()
+  ) -> [EligibilityCard] {
     // The remote (Watch) surface dedupes against the UNION of iPhone + Watch
     // passes: once a card is anywhere in Apple Wallet, the issuer entry
     // disappears entirely (product decision). Watch provisioning for an
@@ -162,41 +222,20 @@ import PassKit
     // iPhone" mirror flow and the in-app Add-to-Watch button, not by this
     // extension. A card on neither device stays listed on both surfaces, so
     // provisioning a brand-new card straight to the Watch still works.
-    let passes = localPasses + remotePasses
+    let passes = remote ? snapshot.localPasses + snapshot.remotePasses : snapshot.localPasses
     let panIds = Set(passes.compactMap { $0.primaryAccountIdentifier })
     let suffixes = Set(passes.map { ProvisioningEligibility.normalizedSuffix($0.primaryAccountNumberSuffix) })
 
-    // Once a surface has proven readable, remember it: from then on an empty
-    // read on that surface means "genuinely empty wallet" (live authority)
-    // rather than "no library access" (flags fallback) — this is what makes
-    // removing the LAST card re-offer it instead of trusting stale flags.
-    if !localPasses.isEmpty {
-      EligibilityCache.recordLiveLibrarySeen(remote: false)
-    }
-    if !remotePasses.isEmpty {
-      EligibilityCache.recordLiveLibrarySeen(remote: true)
-    }
-    let authoritative = !passes.isEmpty
-      || EligibilityCache.isLiveLibraryTrusted(remote: false)
-      || (remote && EligibilityCache.isLiveLibraryTrusted(remote: true))
-
-    // Just-provisioned markers (extension-side adds the app hasn't synced
-    // yet). With an authoritative library the marker is only a short bridge:
-    // confirmed by a live pass → drop it, the live dedup below takes over;
-    // still unconfirmed past the grace window → the add never completed or
-    // the pass was removed again → drop it and re-offer the card. Without
-    // library access the marker is the only signal and keeps hiding the card
-    // until the app's next sync or the marker TTL.
+    // Just-provisioned markers (extension-side adds whose pass may not have
+    // landed yet). Confirmed by a live pass → clear it, the live dedup below
+    // hides the card from here on. Unconfirmed within the grace window →
+    // hide briefly (the pass may still be materializing after a successful
+    // add). Unconfirmed past the grace window → the add failed or the pass
+    // was removed again: clear the marker and re-offer the card.
     var last4Counts: [String: Int] = [:]
     for card in cards { last4Counts[card.last4, default: 0] += 1 }
-    let markers = EligibilityCache.provisionedMarkers()
-    let now = Date()
     let cards = cards.filter { card in
       guard let markedAt = markers[card.cardId] else { return true }
-      guard authoritative else {
-        os_log("eligibility(remote=%{public}d): card last4=%{public}@ excluded (marker, library blind)", log: Self.log, type: .default, remote ? 1 : 0, card.last4)
-        return false
-      }
       let confirmed: Bool
       if let panId = card.panId, !panId.isEmpty {
         confirmed = panIds.contains(panId)
@@ -204,36 +243,23 @@ import PassKit
         confirmed = last4Counts[card.last4] == 1 && suffixes.contains(card.last4)
       }
       if confirmed {
-        // The live library sees the pass — it is the authority from here on.
-        EligibilityCache.clearProvisionedMarker(cardId: card.cardId)
+        markerClears.insert(card.cardId)
         return true
       }
       if now.timeIntervalSince(markedAt) < Self.markerGraceSeconds {
         os_log("eligibility(remote=%{public}d): card last4=%{public}@ excluded (marker, pass materializing)", log: Self.log, type: .default, remote ? 1 : 0, card.last4)
         return false
       }
-      EligibilityCache.clearProvisionedMarker(cardId: card.cardId)
-      os_log("eligibility(remote=%{public}d): card last4=%{public}@ marker dropped (live library refuted it)", log: Self.log, type: .default, remote ? 1 : 0, card.last4)
+      markerClears.insert(card.cardId)
+      os_log("eligibility(remote=%{public}d): card last4=%{public}@ marker dropped (no pass in library past grace — re-offering)", log: Self.log, type: .default, remote ? 1 : 0, card.last4)
       return true
     }
 
-    let keys = cards.map { card in
-      ProvisioningEligibility.CardKey(
-        panId: card.panId,
-        last4: card.last4,
-        // Host-app verdict — consulted only when the library is not
-        // authoritative. The remote surface mirrors the union rule above:
-        // a card already on the iPhone is not offered for the Watch.
-        alreadyProvisioned: remote
-          ? ((card.onWatch ?? false) || (card.onIphone ?? false))
-          : (card.onIphone ?? false)
-      )
-    }
+    let keys = cards.map { ProvisioningEligibility.CardKey(panId: $0.panId, last4: $0.last4) }
     let indices = ProvisioningEligibility.eligibleIndices(
       cards: keys,
       provisionedPanIds: panIds,
-      provisionedSuffixes: suffixes,
-      libraryAuthoritative: authoritative
+      provisionedSuffixes: suffixes
     )
 
     // Debug detail: what the live library exposed and how each cached card was
@@ -241,13 +267,9 @@ import PassKit
     // with the app-side sync logs without dumping full FPANIDs.
     let panIdsDesc = panIds.map { String($0.suffix(6)) }.sorted().joined(separator: ",")
     let suffixesDesc = suffixes.sorted().joined(separator: ",")
-    // mode=live → passes enumerated; mode=live-empty → empty read but the
-    // surface is trusted (live-seen stamp), so empty means empty wallet;
-    // mode=flags → library blind, host-app onIphone/onWatch verdicts decide.
-    let mode = passes.isEmpty ? (authoritative ? "live-empty" : "flags") : "live"
     os_log(
-      "eligibility(remote=%{public}d): mode=%{public}@ %{public}d passes in library — suffixes=[%{public}@] panIds…=[%{public}@] markers=%{public}d",
-      log: Self.log, type: .default, remote ? 1 : 0, mode, passes.count, suffixesDesc, panIdsDesc, markers.count
+      "eligibility(remote=%{public}d): %{public}d passes in library — suffixes=[%{public}@] panIds…=[%{public}@] markers=%{public}d",
+      log: Self.log, type: .default, remote ? 1 : 0, passes.count, suffixesDesc, panIdsDesc, markers.count
     )
     let eligibleSet = Set(indices)
     for (index, key) in keys.enumerated() {
@@ -261,23 +283,25 @@ import PassKit
     return indices.map { cards[$0] }
   }
 
-  private func buildEntries(remote: Bool) -> [PKIssuerProvisioningExtensionPaymentPassEntry] {
+  private func buildEntries(remote: Bool) -> (entries: [PKIssuerProvisioningExtensionPaymentPassEntry], markerClears: Set<String>) {
     guard let file = EligibilityCache.read() else {
       os_log("entries(remote=%{public}d) → [] (no cache)", log: Self.log, type: .default, remote ? 1 : 0)
-      return []
+      return ([], [])
     }
     guard EligibilityCache.isFresh(file) else {
       os_log("entries(remote=%{public}d) → [] (stale cache)", log: Self.log, type: .default, remote ? 1 : 0)
-      return []
+      return ([], [])
     }
     guard SharedKeychain.isTokenValid() else {
       os_log("entries(remote=%{public}d) → [] (invalid token)", log: Self.log, type: .default, remote ? 1 : 0)
-      return []
+      return ([], [])
     }
 
-    let library = PKPassLibrary()
+    let snapshot = librarySnapshot()
+    let markers = EligibilityCache.provisionedMarkers()
+    var markerClears = Set<String>()
 
-    return eligibleCards(file.cards, in: library, remote: remote).compactMap { card -> PKIssuerProvisioningExtensionPaymentPassEntry? in
+    let entries = eligibleCards(file.cards, snapshot: snapshot, remote: remote, markers: markers, markerClears: &markerClears).compactMap { card -> PKIssuerProvisioningExtensionPaymentPassEntry? in
       guard let configuration = PKAddPaymentPassRequestConfiguration(encryptionScheme: .ECC_V2) else {
         return nil
       }
@@ -294,7 +318,7 @@ import PassKit
       // error at activation time. Letting PassKit infer the network from
       // the encrypted payload is the safer default.
 
-      let art = EligibilityCache.cardArtImage(cardId: card.cardId) ?? Self.placeholderArt()
+      let art = EligibilityCache.cardArtImage(cardId: card.cardId) ?? Self.bundledFallbackArt ?? Self.placeholderArt()
       return PKIssuerProvisioningExtensionPaymentPassEntry(
         identifier: card.cardId,
         title: card.displayName,
@@ -302,9 +326,35 @@ import PassKit
         addRequestConfiguration: configuration
       )
     }
+    return (entries, markerClears)
   }
 
-  /// A 1×1 transparent image used only when no card-art thumbnail is cached.
+  /// Real Darb card art bundled with the pod (1536×969, squared corners per
+  /// Issuer Functional Requirements §4.7/§7.2). Used whenever the host app
+  /// has not cached a per-card thumbnail via `setWalletExtensionCardArt`,
+  /// so Wallet's provisioning sheet never shows a blank tile.
+  ///
+  /// The PNG ships in the CocoaPods resource bundle
+  /// `react-native-wallet-extension.bundle`; probe the class's own bundle
+  /// first (framework build), then the appex main bundle (static-lib build).
+  private static let bundledFallbackArt: CGImage? = {
+    let containers = [Bundle(for: WalletIssuerProvisioningExtensionHandler.self), Bundle.main]
+    for container in containers {
+      guard let bundleURL = container.url(forResource: "react-native-wallet-extension", withExtension: "bundle"),
+            let bundle = Bundle(url: bundleURL),
+            let artURL = bundle.url(forResource: "darb-card-art", withExtension: "png"),
+            let source = CGImageSourceCreateWithURL(artURL as CFURL, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        continue
+      }
+      return image
+    }
+    os_log("bundled fallback card art missing from resource bundle", log: log, type: .error)
+    return nil
+  }()
+
+  /// A 1×1 transparent image used only when no card-art thumbnail is cached
+  /// AND the bundled fallback art could not be loaded (should never happen).
   /// The entry initializer requires a non-nil CGImage; this keeps the card
   /// visible rather than dropping it.
   private static func placeholderArt() -> CGImage {

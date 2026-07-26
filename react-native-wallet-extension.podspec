@@ -30,4 +30,12 @@ Pod::Spec.new do |s|
 
   s.source_files = "ios/shared/**/*.swift", "ios/extension/**/*.swift"
   s.frameworks   = "PassKit", "Foundation", "CoreGraphics", "ImageIO", "Security"
+
+  # Bundled fallback card art (Issuer Functional Requirements §4.7 requires
+  # real card art in the provisioning flow; a blank placeholder is not
+  # compliant). Shipped as a named resource bundle so the extension can load
+  # it regardless of whether the pod is built as a static lib or framework.
+  s.resource_bundles = {
+    "react-native-wallet-extension" => ["ios/extension/Resources/*.png"]
+  }
 end

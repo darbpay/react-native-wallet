@@ -3,6 +3,18 @@ import Foundation
 /// Pure decision core for "which cached cards should the provisioning
 /// extension still offer?".
 ///
+/// The LIVE pass library is the single authority, exactly as Apple's
+/// in-app provisioning guide prescribes (§10.2: "exclude any passes the user
+/// has already added to their device"; FAQ p.90: "Use the iOS APIs to
+/// retrieve passes in iPhone and Apple Watch, and update these values based
+/// on their presence"):
+///  - card present in the library  → hidden (already provisioned),
+///  - card absent from the library → offered (eligible), including cards
+///    whose previous add attempt failed — a failed add leaves no pass, so
+///    the card must stay addable (Issuer Functional Requirements 4.7:
+///    "Offer Wallet Extension provisioning functionality to all Eligible
+///    Cards").
+///
 /// Dedup keys, in order of authority:
 ///  1. `panId` (Apple `primaryAccountIdentifier`) — exact, per-pass identity.
 ///  2. `last4` vs a provisioned pass's `primaryAccountNumberSuffix` — fallback
@@ -10,14 +22,6 @@ import Foundation
 ///     backend → app-refetch → cache-rewrite round trip is slow, and the cache
 ///     may be days stale). Only trusted when the last4 is unique among the
 ///     cached cards, so a collision can hide a ghost but never an addable card.
-///
-/// When the extension's own pass-library read comes back empty it falls back
-/// to the host app's per-surface verdicts (`alreadyProvisioned`). Proven
-/// necessary on-device: the appex's PKPassLibrary returns 0 passes even with a
-/// DarbPay card in the wallet (payment-pass visibility is granted per App ID
-/// and the extension App ID isn't enabled), so the app's flags — plus the
-/// extension's own just-provisioned markers, applied by the handler before
-/// this decision — are the only working signals until Apple enables it.
 ///
 /// Known limitation, accepted: the suffix set comes from the user's whole pass
 /// library, so a same-last4 pass from another issuer can suppress a DarbPay
@@ -29,18 +33,11 @@ enum ProvisioningEligibility {
   struct CardKey {
     let panId: String?
     let last4: String
-    /// Host-app verdict for THIS surface (iPhone or Watch), computed from the
-    /// app's own pass-library read at sync time. Used only when the
-    /// extension's live library reads come back empty; the live panId/suffix
-    /// checks below still apply on top so the extension self-corrects the
-    /// moment they start working.
-    let alreadyProvisioned: Bool
 
-    init(panId: String?, last4: String, alreadyProvisioned: Bool = false) {
+    init(panId: String?, last4: String) {
       // Treat empty-string panId (possible via JSON round trips) as absent.
       self.panId = (panId?.isEmpty ?? true) ? nil : panId
       self.last4 = last4
-      self.alreadyProvisioned = alreadyProvisioned
     }
   }
 
@@ -55,18 +52,11 @@ enum ProvisioningEligibility {
 
   /// Indices (into `cards`) of the cards still eligible for provisioning on
   /// the surface described by `provisionedPanIds` / `provisionedSuffixes`
-  /// (iPhone-local passes or paired-Watch remote passes).
-  ///
-  /// `libraryAuthoritative` is decided by the caller: true when the surface's
-  /// enumeration returned passes, OR returned empty but the surface has a
-  /// fresh live-seen stamp (so "empty" means a genuinely empty wallet, e.g.
-  /// the user removed their only card — every cached card is addable again).
-  /// A stale app-written flag must never override an authoritative library.
+  /// (iPhone-local passes, or the iPhone+Watch union for the remote surface).
   static func eligibleIndices(
     cards: [CardKey],
     provisionedPanIds: Set<String>,
-    provisionedSuffixes: Set<String>,
-    libraryAuthoritative: Bool
+    provisionedSuffixes: Set<String>
   ) -> [Int] {
     var last4Counts: [String: Int] = [:]
     for card in cards {
@@ -75,20 +65,13 @@ enum ProvisioningEligibility {
 
     return cards.indices.filter { index in
       let card = cards[index]
-      if libraryAuthoritative {
-        if let panId = card.panId {
-          return !provisionedPanIds.contains(panId)
-        }
-        // No panId: fall back to suffix matching, but only when this last4
-        // uniquely identifies one cached card.
-        guard last4Counts[card.last4] == 1 else { return true }
-        return !provisionedSuffixes.contains(card.last4)
+      if let panId = card.panId {
+        return !provisionedPanIds.contains(panId)
       }
-      // Degraded mode: an empty list means either a genuinely empty wallet
-      // (flags are false → same answer) or no library access for this App ID
-      // (flags carry the host app's verdict). Either way the flag is the best
-      // available truth.
-      return !card.alreadyProvisioned
+      // No panId: fall back to suffix matching, but only when this last4
+      // uniquely identifies one cached card.
+      guard last4Counts[card.last4] == 1 else { return true }
+      return !provisionedSuffixes.contains(card.last4)
     }
   }
 }
