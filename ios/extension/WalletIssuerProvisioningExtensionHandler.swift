@@ -215,14 +215,13 @@ import PassKit
     markerClears: inout Set<String>,
     now: Date = Date()
   ) -> [EligibilityCard] {
-    // The remote (Watch) surface dedupes against the UNION of iPhone + Watch
-    // passes: once a card is anywhere in Apple Wallet, the issuer entry
-    // disappears entirely (product decision). Watch provisioning for an
-    // iPhone-resident card is served by Wallet's native "cards on your
-    // iPhone" mirror flow and the in-app Add-to-Watch button, not by this
-    // extension. A card on neither device stays listed on both surfaces, so
-    // provisioning a brand-new card straight to the Watch still works.
-    let passes = remote ? snapshot.localPasses + snapshot.remotePasses : snapshot.localPasses
+    // Each surface dedupes against its OWN device only (Apple FAQ p.90:
+    // "retrieve passes in iPhone and Apple Watch, and update these values
+    // based on their presence"): the iPhone list hides iPhone-resident
+    // passes, the Watch list hides Watch-resident passes. A card already on
+    // the iPhone therefore stays offered on the Watch surface until it is
+    // added to the Watch too — only then does it disappear from both lists.
+    let passes = remote ? snapshot.remotePasses : snapshot.localPasses
     let panIds = Set(passes.compactMap { $0.primaryAccountIdentifier })
     let suffixes = Set(passes.map { ProvisioningEligibility.normalizedSuffix($0.primaryAccountNumberSuffix) })
 
